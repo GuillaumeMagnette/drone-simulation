@@ -1,0 +1,100 @@
+import pygame
+
+class Node:
+    def __init__(self, row, col, grid_size, total_rows):
+        self.row = row
+        self.col = col
+        self.x = row * grid_size
+        self.y = col * grid_size
+        self.color = (255, 255, 255) # White (walkable)
+        self.neighbors = []
+        self.grid_size = grid_size
+        self.total_rows = total_rows
+        self.is_obstacle = False
+        
+        # A* properties
+        self.g_cost = float('inf')
+        self.h_cost = float('inf')
+        self.f_cost = float('inf')
+        self.parent = None
+        
+    def draw(self, screen):
+        """Draws the node on the screen."""
+        pygame.draw.rect(screen, self.color, (self.x, self.y, self.grid_size, self.grid_size))
+
+    def make_obstacle(self):
+        """Sets this node to be an obstacle."""
+        self.color = (0, 0, 0) # Black
+        self.is_obstacle = True
+
+    def reset(self):
+        """Resets the node to be walkable."""
+        self.color = (255, 255, 255) # White
+        self.is_obstacle = False
+        # Also reset A* properties for a new pathfind
+        self.g_cost = float('inf')
+        self.h_cost = float('inf')
+        self.f_cost = float('inf')
+        self.parent = None
+    def update_neighbors(self, grid):
+        """
+        Checks all 8 surrounding nodes (Up, Down, Left, Right, and Diagonals).
+        Adds them to self.neighbors if they are walkable.
+        """
+        self.neighbors = []
+
+        # We use these shorthands to make the if-statements cleaner
+        # self.row and self.col are the CURRENT node's indices
+        
+        # DOWN
+        if self.row < self.total_rows - 1 and not grid[self.row + 1][self.col].is_obstacle:
+            self.neighbors.append(grid[self.row + 1][self.col])
+
+        # UP
+        if self.row > 0 and not grid[self.row - 1][self.col].is_obstacle:
+            self.neighbors.append(grid[self.row - 1][self.col])
+
+        # RIGHT
+        if self.col < self.total_rows - 1 and not grid[self.row][self.col + 1].is_obstacle:
+            self.neighbors.append(grid[self.row][self.col + 1])
+
+        # LEFT
+        if self.col > 0 and not grid[self.row][self.col - 1].is_obstacle:
+            self.neighbors.append(grid[self.row][self.col - 1])
+
+        # --- DIAGONALS ---
+
+        # DOWN-RIGHT
+        if (self.row < self.total_rows - 1 and self.col < self.total_rows - 1 and 
+            not grid[self.row + 1][self.col + 1].is_obstacle):
+            self.neighbors.append(grid[self.row + 1][self.col + 1])
+
+        # DOWN-LEFT
+        if (self.row < self.total_rows - 1 and self.col > 0 and 
+            not grid[self.row + 1][self.col - 1].is_obstacle):
+            self.neighbors.append(grid[self.row + 1][self.col - 1])
+
+        # UP-RIGHT
+        if (self.row > 0 and self.col < self.total_rows - 1 and 
+            not grid[self.row - 1][self.col + 1].is_obstacle):
+            self.neighbors.append(grid[self.row - 1][self.col + 1])
+
+        # UP-LEFT
+        if (self.row > 0 and self.col > 0 and 
+            not grid[self.row - 1][self.col - 1].is_obstacle):
+            self.neighbors.append(grid[self.row - 1][self.col - 1])
+    
+    def make_start(self):
+        self.color = (255, 165, 0) # Orange
+
+    def make_end(self):
+        self.color = (64, 224, 208) # Turquoise
+
+    def make_closed(self):
+        self.color = (255, 0, 0) # Red (Already checked)
+
+    def make_open(self):
+        self.color = (0, 255, 0) # Green (In the queue)
+
+    def make_path(self):
+        self.color = (128, 0, 128) # Purple (The final path)

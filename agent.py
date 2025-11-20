@@ -180,18 +180,18 @@ class Agent:
                 elif self.velocity[1] < 0: self.rect.top = obstacle.bottom
                 self.position[1] = self.rect.centery
 
-    # def aim(self, target_pos):
-    #     """
-    #     Calculates the forward vector to face a target position.
-    #     :param target_pos: A NumPy array representing the target's coordinates.
-    #     """
-    #     # --- 2. IMPLEMENT THE AIMING LOGIC ---
-    #     vector_to_target = target_pos - self.position
+    def aim(self, target_pos):
+        """
+        Calculates the forward vector to face a target position.
+        :param target_pos: A NumPy array representing the target's coordinates.
+        """
+        # --- 2. IMPLEMENT THE AIMING LOGIC ---
+        vector_to_target = target_pos - self.position
         
-    #     norm = np.linalg.norm(vector_to_target)
-    #     if norm > 0:
-    #         # Normalize the vector to get the pure direction
-    #         self.forward_vector = vector_to_target / norm
+        norm = np.linalg.norm(vector_to_target)
+        if norm > 0:
+            # Normalize the vector to get the pure direction
+            self.forward_vector = vector_to_target / norm
             
     def draw(self, screen):
         """

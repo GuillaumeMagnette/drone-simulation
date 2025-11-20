@@ -3,6 +3,7 @@ import numpy as np
 from agent import Agent
 from grid import Grid
 from algorithm import a_star_algorithm
+from projectile import Projectile # <-- IMPORT THIS
 
 pygame.init()
 debug_font = pygame.font.SysFont("Arial", 16)
@@ -29,6 +30,11 @@ dummy_enemies = [dummy_enemy]
 # Variables for manual A* testing (Right Click + Spacebar)
 start_node = None
 end_node = None
+
+# --- PROJECTILE SETUP ---
+projectiles = []
+shoot_timer = 0.0
+SHOOT_INTERVAL = 2.0 # Enemy shoots every 2 seconds
 
 running = True
 while running:
@@ -89,6 +95,31 @@ while running:
                     # If we found a path manually, we can tell the agent to follow it
                     if path: 
                         player.set_path(path)
+                
+
+    # --- ENEMY SHOOTING LOGIC ---
+    shoot_timer -= dt
+    if shoot_timer <= 0:
+        shoot_timer = SHOOT_INTERVAL
+        # Spawn a bullet from the dummy enemy aiming at the player
+        # We use the center of the enemy and the center of the player
+        new_bullet = Projectile(dummy_enemy.center, player.rect.center)
+        projectiles.append(new_bullet)
+    
+    # --- UPDATE PROJECTILES ---
+    for bullet in projectiles[:]: # Iterate over a copy to allow removal
+        bullet.update(dt)
+        
+        # 1. Remove if off screen (Simple cleanup)
+        if not screen.get_rect().collidepoint(bullet.position):
+            projectiles.remove(bullet)
+            continue
+            
+        # 2. Check Collision with Player
+        if player.rect.colliderect(bullet.rect):
+            print("HIT! -10 Points")
+            projectiles.remove(bullet)
+            # In the future, this is where we reset the episode
 
     # --- CONTINUOUS INPUT (WASD) ---
     # This was missing! We need this for Manual Mode.
@@ -108,15 +139,23 @@ while running:
     all_collidables = walls + dummy_enemies
     
     # 3. Pass the combined list to the agent
+    mouse_pos = np.array(pygame.mouse.get_pos())
+    player.aim(mouse_pos)
     player.update(dt, player_direction_vector, all_collidables, dummy_enemies, grid)
 
     # --- DRAWING ---
     screen.fill((255, 255, 255))
     
     grid.draw(screen)
+    player.draw_awareness(screen, dummy_enemies, debug_font)
     
     # Draw the dummy enemy (Red Square)
     pygame.draw.rect(screen, (255, 0, 0), dummy_enemy)
+
+    # --- ADD THIS: Draw Projectiles ---
+    for bullet in projectiles:
+        bullet.draw(screen)
+    # ----------------------------------
     
     player.draw(screen)
     pygame.display.flip()
