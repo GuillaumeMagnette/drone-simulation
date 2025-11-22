@@ -40,11 +40,22 @@ class Agent:
         self.repath_interval = 0.5 
         
         self.color_map = {
-            "PLAYER_CONTROLLED": (255, 255, 255),
+            "PLAYER_CONTROLLED": (0, 255, 0),
             "AUTOMATIC_CHASE": (100, 100, 255),
             "PATH_FOLLOWING": (255, 0, 255)
         }
         self.color = self.color_map[self.state]
+
+        # --- RL BRAIN SETUP ---
+        self.q_table = {} # The empty cheat sheet
+        
+        # Hyperparameters
+        self.epsilon = 1.0      # 100% Random at start
+        self.epsilon_min = 0.1  # Minimum exploration
+        self.epsilon_decay = 0.995 # Fade out exploration over time
+        
+        self.alpha = 0.1        # Learning Rate
+        self.gamma = 0.9        # Discount Factor
 
         # Pygame uses Rect objects to store and manage an object's position and size.
         # This is extremely useful for drawing and, later, for collision detection.
@@ -165,20 +176,44 @@ class Agent:
         # X-axis collision
         self.position[0] += self.velocity[0] * dt
         self.rect.centerx = round(self.position[0])
+
+        # 1. Check Walls
         for obstacle in collidables:
             if self.rect.colliderect(obstacle):
                 if self.velocity[0] > 0: self.rect.right = obstacle.left
                 elif self.velocity[0] < 0: self.rect.left = obstacle.right
                 self.position[0] = self.rect.centerx
+        
+        # 2. Check Screen Boundaries (NEW)
+        # Assuming we pass screen_width/height or know them (800x800)
+        # You can hardcode 800 for now or pass it in __init__
+        SCREEN_LIMIT = 800 
+        
+        if self.rect.left < 0:
+            self.rect.left = 0
+            self.position[0] = self.rect.centerx
+        elif self.rect.right > SCREEN_LIMIT:
+            self.rect.right = SCREEN_LIMIT
+            self.position[0] = self.rect.centerx
 
         # Y-axis collision
         self.position[1] += self.velocity[1] * dt
         self.rect.centery = round(self.position[1])
+
+        # 1. Check Walls
         for obstacle in collidables:
             if self.rect.colliderect(obstacle):
                 if self.velocity[1] > 0: self.rect.bottom = obstacle.top
                 elif self.velocity[1] < 0: self.rect.top = obstacle.bottom
                 self.position[1] = self.rect.centery
+
+        # 2. Check Screen Boundaries (NEW)
+        if self.rect.top < 0:
+            self.rect.top = 0
+            self.position[1] = self.rect.centery
+        elif self.rect.bottom > SCREEN_LIMIT:
+            self.rect.bottom = SCREEN_LIMIT
+            self.position[1] = self.rect.centery
 
     def aim(self, target_pos):
         """
@@ -246,3 +281,191 @@ class Agent:
             # Draw the debug text
             text = font.render(f"Dot: {dot_product:.2f}", True, (255, 255, 255))
             screen.blit(text, (enemy_rect.x, enemy_rect.y - 20))
+
+    # --- RL INTERFACE ---
+
+    def get_grid_state(self):
+        """
+        Converts the agent's continuous pixel position into discrete grid coordinates.
+        Returns: (col, row) tuple which acts as the 'State' for the Q-Table.
+        """
+        # We use the size of the agent (which matches grid size) to divide
+        grid_x = int(self.position[0] // self.size)
+        grid_y = int(self.position[1] // self.size)
+        return (grid_x, grid_y)
+    
+    # --- SENSORY INPUT (THE NEW EYES) ---
+
+    def get_relative_state(self, targets, projectiles):
+        """
+        Returns: 
+        (target_dx, target_dy, danger_level, wall_x, wall_y)
+        """
+        # 1. TARGET SENSING (Same as before)
+        target_dx = 0
+        target_dy = 0
+        closest_target = self._find_closest_enemy(targets)
+        if closest_target:
+            raw_dx = closest_target.centerx - self.rect.centerx
+            raw_dy = closest_target.centery - self.rect.centery
+            if raw_dx < -20: target_dx = -1
+            elif raw_dx > 20: target_dx = 1
+            if raw_dy < -20: target_dy = -1
+            elif raw_dy > 20: target_dy = 1
+
+        # 2. ADVANCED THREAT SENSING (The Fix)
+        # We condense "Line X/Y/Close" into a single "Danger Level"
+        # 0 = Safe
+        # 1 = Bullet nearby but missing
+        # 2 = Bullet on COLLISION COURSE (Run!)
+        
+        danger_level = 0
+        self.is_in_danger_zone = False # Reset flag
+
+        closest_bullet = self._find_closest_projectile(projectiles)
+        
+        if closest_bullet:
+            # Distance to bullet
+            dist_to_bullet = np.linalg.norm(closest_bullet.position - self.position)
+            
+            # SENSOR RANGE: Agent can "see" bullets within 300 pixels (approx 15 grid blocks)
+            if dist_to_bullet < 300:
+                danger_level = 1 # We see it!
+                
+                # --- TRAJECTORY CALCULATION ---
+                # Predict where the bullet will be in 1 second (Projected Line)
+                # Bullet velocity vector
+                b_vel = closest_bullet.direction * closest_bullet.speed
+                
+                # Start point (Bullet now)
+                p1 = closest_bullet.position
+                # End point (Bullet in 0.5 seconds - look ahead)
+                p2 = p1 + (b_vel * 0.5) 
+                
+                # Check if the Agent is close to this line segment
+                dist_from_trajectory = self._point_to_segment_dist(
+                    self.position[0], self.position[1],
+                    p1[0], p1[1],
+                    p2[0], p2[1]
+                )
+                
+                # The "Tube" radius: Agent Size + Bullet Radius + Margin
+                safe_radius = (self.size / 2) + 5 + 10 
+                
+                if dist_from_trajectory < safe_radius:
+                    danger_level = 2 # CRITICAL THREAT
+                    self.is_in_danger_zone = True
+
+        # 3. WALL SENSING (Same as before)
+        wall_x = 0
+        wall_y = 0
+        margin = 50 
+        if self.rect.left < margin: wall_x = -1
+        elif self.rect.right > (800 - margin): wall_x = 1
+        if self.rect.top < margin: wall_y = -1
+        elif self.rect.bottom > (800 - margin): wall_y = 1
+
+        # Return simplified tuple
+        return (int(target_dx), int(target_dy), int(danger_level), int(wall_x), int(wall_y))
+
+    def _point_to_segment_dist(self, px, py, x1, y1, x2, y2):
+        """
+        Calculates the shortest distance from point (px, py) to the line segment (x1,y1)->(x2,y2).
+        This detects diagonal threats perfectly.
+        """
+        # Vector from p1 to p2
+        dx = x2 - x1
+        dy = y2 - y1
+        if dx == 0 and dy == 0: 
+            return np.sqrt((px - x1)**2 + (py - y1)**2)
+
+        # Project point onto line (parameter t)
+        t = ((px - x1) * dx + (py - y1) * dy) / (dx*dx + dy*dy)
+
+        # Clamp t to segment [0, 1]
+        t = max(0, min(1, t))
+
+        # Closest point on segment
+        nearest_x = x1 + t * dx
+        nearest_y = y1 + t * dy
+
+        # Distance
+        return np.sqrt((px - nearest_x)**2 + (py - nearest_y)**2)
+
+    def _find_closest_projectile(self, projectiles):
+        """Helper to find the nearest bullet."""
+        closest = None
+        min_dist = float('inf')
+        
+        for p in projectiles:
+            # Check distance to center
+            dist = np.linalg.norm(p.position - self.position)
+            if dist < min_dist:
+                min_dist = dist
+                closest = p
+        return closest
+
+    def move_discrete(self, action_index):
+        """
+        Translates a discrete index (0-3) into a movement vector.
+        0: Up, 1: Down, 2: Left, 3: Right
+        """
+        # Create a vector based on the integer action
+        direction = np.array([0.0, 0.0])
+        
+        if action_index == 0:   # UP
+            direction[1] = -1
+        elif action_index == 1: # DOWN
+            direction[1] = 1
+        elif action_index == 2: # LEFT
+            direction[0] = -1
+        elif action_index == 3: # RIGHT
+            direction[0] = 1
+            
+        # Now we just pass this vector to our existing physics engine!
+        # Note: We need to pass 'collidables' to this function or store it in self
+        # For now, let's just calculate the vector.
+        return direction
+    
+    def choose_action(self, state):
+        """
+        Epsilon-Greedy Logic:
+        Sometimes do something random to learn.
+        Mostly do what we know is best.
+        """
+        # 1. EXPLORE: Random Action
+        if np.random.random() < self.epsilon:
+            return np.random.randint(0, 4) # Random 0, 1, 2, or 3
+        
+        # 2. EXPLOIT: Best Action
+        # Check if this state exists in the table yet
+        if state not in self.q_table:
+            # If new state, initialize with zeros [Up, Down, Left, Right]
+            self.q_table[state] = [0.0, 0.0, 0.0, 0.0]
+            
+        # Pick the index of the highest value
+        return np.argmax(self.q_table[state])
+    
+    def learn(self, state, action, reward, next_state):
+        """
+        The Heart of Q-Learning.
+        """
+        # FIX: Ensure CURRENT state exists before reading it
+        if state not in self.q_table:
+            self.q_table[state] = [0.0, 0.0, 0.0, 0.0]
+
+        # 1. Ensure the 'next_state' exists (You already have this)
+        if next_state not in self.q_table:
+            self.q_table[next_state] = [0.0, 0.0, 0.0, 0.0]
+
+        # 2. Get the Old Q-Value
+        old_value = self.q_table[state][action]
+        
+        # 3. Get the Max Future Q-Value
+        next_max = np.max(self.q_table[next_state])
+        
+        # 4. The Bellman Equation
+        new_value = old_value + self.alpha * (reward + self.gamma * next_max - old_value)
+        
+        # 5. Update the Table
+        self.q_table[state][action] = new_value
