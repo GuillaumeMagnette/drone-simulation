@@ -27,8 +27,10 @@ class Agent:
 
         self.size = size
 
-        # NEW: Initialize danger distance
+        # NEW: Memory for dodging
         self.danger_dist = 1000.0 
+        self.dodge_timer = 0.0
+        self.locked_safety_dir = 0
         
         
         # --- 1. STATE MACHINE SETUP ---
@@ -304,7 +306,21 @@ class Agent:
         Returns: 
         (target_dx, target_dy, danger_level, safety_direction, wall_x, wall_y)
         """
-        # --- 1. TARGET SENSING (Existing Logic) ---
+        # --- 1. WALL SENSING (Top Priority) ---
+        wall_x = 0
+        wall_y = 0
+        step = 5 
+        
+        rect_right = self.rect.move(step, 0)
+        if rect_right.right > 800 or rect_right.collidelist(walls) != -1: wall_x = 1
+        rect_left = self.rect.move(-step, 0)
+        if rect_left.left < 0 or rect_left.collidelist(walls) != -1: wall_x = -1
+        rect_down = self.rect.move(0, step)
+        if rect_down.bottom > 800 or rect_down.collidelist(walls) != -1: wall_y = 1
+        rect_up = self.rect.move(0, -step)
+        if rect_up.top < 0 or rect_up.collidelist(walls) != -1: wall_y = -1
+
+        # --- 2. TARGET SENSING (A* Lookahead) ---
         target_dx = 0
         target_dy = 0
         target_pos = None
@@ -332,14 +348,20 @@ class Agent:
             if raw_dy < -10: target_dy = -1
             elif raw_dy > 10: target_dy = 1
 
-        # --- 2. THREAT SENSING (ESCAPE COMPASS) ---
+        # --- 3. THREAT SENSING (LOCKED COMPASS) ---
         danger_level = 0
-        safety_direction = 0 # 0=Safe, 1=Up, 2=Down, 3=Left, 4=Right
         self.is_in_danger_zone = False 
-        self.danger_dist = 1000.0 # Reset distance
+        self.danger_dist = 1000.0
+        
+        # Decrement lock timer (assuming dt ~ 0.016, we just decrement by 1 frame count or rely on main loop dt)
+        # Note: Ideally we pass dt here, but for now we just decrement by a fixed amount
+        self.dodge_timer -= 0.016 
 
         closest_bullet = self._find_closest_projectile(projectiles)
         
+        # Default to safe
+        safety_direction = 0 
+
         if closest_bullet:
             dist_to_bullet = np.linalg.norm(closest_bullet.position - self.position)
             
@@ -348,7 +370,6 @@ class Agent:
                 p1 = closest_bullet.position
                 p2 = p1 + (b_vel * 1.5) 
                 
-                # GET DISTANCE AND NEAREST POINT (nx, ny)
                 dist_from_trajectory, nx, ny = self._point_to_segment_dist(
                     self.position[0], self.position[1],
                     p1[0], p1[1],
@@ -356,25 +377,6 @@ class Agent:
                 )
                 self.danger_dist = dist_from_trajectory
                 
-                # --- CALCULATE ESCAPE COMPASS ---
-                # Vector from Line -> Agent
-                esc_x = self.position[0] - nx
-                esc_y = self.position[1] - ny
-                
-                # "Perfect Center" Fix: If vector is essentially zero, pick a perpendicular
-                if abs(esc_x) < 0.1 and abs(esc_y) < 0.1:
-                    # Perpendicular to bullet velocity (-y, x)
-                    esc_x = -b_vel[1]
-                    esc_y = b_vel[0]
-
-                # Determine primary direction of escape
-                if abs(esc_x) > abs(esc_y):
-                    if esc_x < 0: safety_direction = 3 # LEFT
-                    else:         safety_direction = 4 # RIGHT
-                else:
-                    if esc_y < 0: safety_direction = 1 # UP
-                    else:         safety_direction = 2 # DOWN
-
                 # --- ZONE LOGIC ---
                 critical_radius = self.size + 10 
                 warning_radius = critical_radius * 2.0 
@@ -384,26 +386,65 @@ class Agent:
                     self.is_in_danger_zone = True
                 elif dist_from_trajectory < warning_radius:
                     danger_level = 1
-                else:
-                    safety_direction = 0 # Reset if safe
 
-        # --- 3. WALL SENSING (Short Whiskers) ---
-        wall_x = 0
-        wall_y = 0
-        step = 5 # Reduced step
-        
-        rect_right = self.rect.move(step, 0)
-        if rect_right.right > 800 or rect_right.collidelist(walls) != -1: wall_x = 1
-        rect_left = self.rect.move(-step, 0)
-        if rect_left.left < 0 or rect_left.collidelist(walls) != -1: wall_x = -1
-        rect_down = self.rect.move(0, step)
-        if rect_down.bottom > 800 or rect_down.collidelist(walls) != -1: wall_y = 1
-        rect_up = self.rect.move(0, -step)
-        if rect_up.top < 0 or rect_up.collidelist(walls) != -1: wall_y = -1
+                # --- DECISION LOGIC ---
+                # Only recalculate if NOT locked or if we are SAFE
+                if self.dodge_timer <= 0 or danger_level == 0:
+                    
+                    # 1. Calculate Geometric Escape Vector (Ideal)
+                    esc_x = self.position[0] - nx
+                    esc_y = self.position[1] - ny
+                    
+                    # Perfect Center Fix
+                    if abs(esc_x) < 0.1 and abs(esc_y) < 0.1:
+                        esc_x = -b_vel[1]
+                        esc_y = b_vel[0]
 
-        # RETURN UPDATED TUPLE (Added safety_direction)
+                    # 2. MASKING (The smart part)
+                    # If Ideal Vector points into a wall, ZERO it out.
+                    # e.g. Want Right (esc_x > 0) but Wall Right (wall_x == 1) -> esc_x = 0
+                    if esc_x > 0 and wall_x == 1: esc_x = 0
+                    if esc_x < 0 and wall_x == -1: esc_x = 0
+                    if esc_y > 0 and wall_y == 1: esc_y = 0
+                    if esc_y < 0 and wall_y == -1: esc_y = 0
+                    
+                    # 3. Determine Direction from Masked Vector
+                    calculated_dir = 0
+                    
+                    # If Vector is dead (Trapped against wall), Run Parallel
+                    if abs(esc_x) < 0.1 and abs(esc_y) < 0.1:
+                         if abs(b_vel[0]) > abs(b_vel[1]): # Horizontal Bullet
+                             if b_vel[0] > 0: calculated_dir = 4 # Run Right
+                             else:            calculated_dir = 3 # Run Left
+                         else: # Vertical Bullet
+                             if b_vel[1] > 0: calculated_dir = 2 # Run Down
+                             else:            calculated_dir = 1 # Run Up
+                    else:
+                        # Use the Masked Vector
+                        if abs(esc_x) > abs(esc_y):
+                            if esc_x < 0: calculated_dir = 3 # Left
+                            else:         calculated_dir = 4 # Right
+                        else:
+                            if esc_y < 0: calculated_dir = 1 # Up
+                            else:         calculated_dir = 2 # Down
+                    
+                    # Update the lock
+                    self.locked_safety_dir = calculated_dir
+                    
+                    # If we are in DANGER, Lock this decision for 0.2 seconds
+                    if danger_level > 0:
+                        self.dodge_timer = 0.2
+                
+                # Apply the locked direction
+                safety_direction = self.locked_safety_dir
+                
+                # If safe, force 0
+                if danger_level == 0:
+                    safety_direction = 0
+                    self.dodge_timer = 0 # Release lock immediately if safe
+
         return (int(target_dx), int(target_dy), int(danger_level), int(safety_direction), int(wall_x), int(wall_y))
-
+    
     def _point_to_segment_dist(self, px, py, x1, y1, x2, y2):
         """
         Calculates distance AND the nearest point on the segment.
