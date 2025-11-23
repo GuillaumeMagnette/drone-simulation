@@ -26,6 +26,9 @@ class Agent:
         self.forward_vector = np.array([0.0, -1.0])
 
         self.size = size
+
+        # NEW: Initialize danger distance
+        self.danger_dist = 1000.0 
         
         
         # --- 1. STATE MACHINE SETUP ---
@@ -296,101 +299,129 @@ class Agent:
     
     # --- SENSORY INPUT (THE NEW EYES) ---
 
-    def get_relative_state(self, targets, projectiles):
+    def get_relative_state(self, targets, projectiles, walls):
         """
         Returns: 
-        (target_dx, target_dy, danger_level, wall_x, wall_y)
+        (target_dx, target_dy, danger_level, safety_direction, wall_x, wall_y)
         """
-        # 1. TARGET SENSING (Same as before)
+        # --- 1. TARGET SENSING (Existing Logic) ---
         target_dx = 0
         target_dy = 0
-        closest_target = self._find_closest_enemy(targets)
-        if closest_target:
-            raw_dx = closest_target.centerx - self.rect.centerx
-            raw_dy = closest_target.centery - self.rect.centery
-            if raw_dx < -20: target_dx = -1
-            elif raw_dx > 20: target_dx = 1
-            if raw_dy < -20: target_dy = -1
-            elif raw_dy > 20: target_dy = 1
-
-        # 2. ADVANCED THREAT SENSING (The Fix)
-        # We condense "Line X/Y/Close" into a single "Danger Level"
-        # 0 = Safe
-        # 1 = Bullet nearby but missing
-        # 2 = Bullet on COLLISION COURSE (Run!)
+        target_pos = None
         
+        if self.path:
+            lookahead_index = min(len(self.path) - 1, 2) 
+            target_node = self.path[lookahead_index]
+            next_immediate_node = self.path[0]
+            node_center = np.array([next_immediate_node.x + self.size//2, 
+                                    next_immediate_node.y + self.size//2])
+            if np.linalg.norm(node_center - self.position) < 30:
+                self.path.pop(0)
+            target_pos = (target_node.x + self.size // 2, target_node.y + self.size // 2)
+        
+        if target_pos is None:
+            closest_enemy = self._find_closest_enemy(targets)
+            if closest_enemy: target_pos = closest_enemy.center
+
+        if target_pos:
+            tx, ty = target_pos
+            raw_dx = tx - self.rect.centerx
+            raw_dy = ty - self.rect.centery
+            if raw_dx < -10: target_dx = -1
+            elif raw_dx > 10: target_dx = 1
+            if raw_dy < -10: target_dy = -1
+            elif raw_dy > 10: target_dy = 1
+
+        # --- 2. THREAT SENSING (ESCAPE COMPASS) ---
         danger_level = 0
-        self.is_in_danger_zone = False # Reset flag
+        safety_direction = 0 # 0=Safe, 1=Up, 2=Down, 3=Left, 4=Right
+        self.is_in_danger_zone = False 
+        self.danger_dist = 1000.0 # Reset distance
 
         closest_bullet = self._find_closest_projectile(projectiles)
         
         if closest_bullet:
-            # Distance to bullet
             dist_to_bullet = np.linalg.norm(closest_bullet.position - self.position)
             
-            # SENSOR RANGE: Agent can "see" bullets within 300 pixels (approx 15 grid blocks)
             if dist_to_bullet < 300:
-                danger_level = 1 # We see it!
-                
-                # --- TRAJECTORY CALCULATION ---
-                # Predict where the bullet will be in 1 second (Projected Line)
-                # Bullet velocity vector
                 b_vel = closest_bullet.direction * closest_bullet.speed
-                
-                # Start point (Bullet now)
                 p1 = closest_bullet.position
-                # End point (Bullet in 0.5 seconds - look ahead)
-                p2 = p1 + (b_vel * 0.5) 
+                p2 = p1 + (b_vel * 1.5) 
                 
-                # Check if the Agent is close to this line segment
-                dist_from_trajectory = self._point_to_segment_dist(
+                # GET DISTANCE AND NEAREST POINT (nx, ny)
+                dist_from_trajectory, nx, ny = self._point_to_segment_dist(
                     self.position[0], self.position[1],
                     p1[0], p1[1],
                     p2[0], p2[1]
                 )
+                self.danger_dist = dist_from_trajectory
                 
-                # The "Tube" radius: Agent Size + Bullet Radius + Margin
-                safe_radius = (self.size / 2) + 5 + 10 
+                # --- CALCULATE ESCAPE COMPASS ---
+                # Vector from Line -> Agent
+                esc_x = self.position[0] - nx
+                esc_y = self.position[1] - ny
                 
-                if dist_from_trajectory < safe_radius:
-                    danger_level = 2 # CRITICAL THREAT
-                    self.is_in_danger_zone = True
+                # "Perfect Center" Fix: If vector is essentially zero, pick a perpendicular
+                if abs(esc_x) < 0.1 and abs(esc_y) < 0.1:
+                    # Perpendicular to bullet velocity (-y, x)
+                    esc_x = -b_vel[1]
+                    esc_y = b_vel[0]
 
-        # 3. WALL SENSING (Same as before)
+                # Determine primary direction of escape
+                if abs(esc_x) > abs(esc_y):
+                    if esc_x < 0: safety_direction = 3 # LEFT
+                    else:         safety_direction = 4 # RIGHT
+                else:
+                    if esc_y < 0: safety_direction = 1 # UP
+                    else:         safety_direction = 2 # DOWN
+
+                # --- ZONE LOGIC ---
+                critical_radius = self.size + 10 
+                warning_radius = critical_radius * 2.0 
+                
+                if dist_from_trajectory < critical_radius:
+                    danger_level = 2 
+                    self.is_in_danger_zone = True
+                elif dist_from_trajectory < warning_radius:
+                    danger_level = 1
+                else:
+                    safety_direction = 0 # Reset if safe
+
+        # --- 3. WALL SENSING (Short Whiskers) ---
         wall_x = 0
         wall_y = 0
-        margin = 50 
-        if self.rect.left < margin: wall_x = -1
-        elif self.rect.right > (800 - margin): wall_x = 1
-        if self.rect.top < margin: wall_y = -1
-        elif self.rect.bottom > (800 - margin): wall_y = 1
+        step = 5 # Reduced step
+        
+        rect_right = self.rect.move(step, 0)
+        if rect_right.right > 800 or rect_right.collidelist(walls) != -1: wall_x = 1
+        rect_left = self.rect.move(-step, 0)
+        if rect_left.left < 0 or rect_left.collidelist(walls) != -1: wall_x = -1
+        rect_down = self.rect.move(0, step)
+        if rect_down.bottom > 800 or rect_down.collidelist(walls) != -1: wall_y = 1
+        rect_up = self.rect.move(0, -step)
+        if rect_up.top < 0 or rect_up.collidelist(walls) != -1: wall_y = -1
 
-        # Return simplified tuple
-        return (int(target_dx), int(target_dy), int(danger_level), int(wall_x), int(wall_y))
+        # RETURN UPDATED TUPLE (Added safety_direction)
+        return (int(target_dx), int(target_dy), int(danger_level), int(safety_direction), int(wall_x), int(wall_y))
 
     def _point_to_segment_dist(self, px, py, x1, y1, x2, y2):
         """
-        Calculates the shortest distance from point (px, py) to the line segment (x1,y1)->(x2,y2).
-        This detects diagonal threats perfectly.
+        Calculates distance AND the nearest point on the segment.
+        Returns: (distance, nearest_x, nearest_y)
         """
-        # Vector from p1 to p2
         dx = x2 - x1
         dy = y2 - y1
         if dx == 0 and dy == 0: 
-            return np.sqrt((px - x1)**2 + (py - y1)**2)
+            return np.sqrt((px - x1)**2 + (py - y1)**2), x1, y1
 
-        # Project point onto line (parameter t)
         t = ((px - x1) * dx + (py - y1) * dy) / (dx*dx + dy*dy)
-
-        # Clamp t to segment [0, 1]
         t = max(0, min(1, t))
-
-        # Closest point on segment
+        
         nearest_x = x1 + t * dx
         nearest_y = y1 + t * dy
-
-        # Distance
-        return np.sqrt((px - nearest_x)**2 + (py - nearest_y)**2)
+        
+        dist = np.sqrt((px - nearest_x)**2 + (py - nearest_y)**2)
+        return dist, nearest_x, nearest_y
 
     def _find_closest_projectile(self, projectiles):
         """Helper to find the nearest bullet."""

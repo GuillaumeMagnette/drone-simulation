@@ -84,17 +84,29 @@ class Node:
             not grid[self.row - 1][self.col - 1].is_obstacle):
             self.neighbors.append(grid[self.row - 1][self.col - 1])
     
+        # Add this NEW method
+    def reset_visuals(self):
+        """Resets color/path status but KEEPS obstacles."""
+        if not self.is_obstacle:
+            self.color = (255, 255, 255) # White
+            # Reset A* internal parents so new path can be found
+            self.parent = None
+            self.g_cost = float('inf')
+            self.h_cost = float('inf')
+            self.f_cost = float('inf')
+            
     def make_start(self):
         self.color = (255, 165, 0) # Orange
 
     def make_end(self):
         self.color = (64, 224, 208) # Turquoise
 
+    # UPDATE these methods to use non-confusing colors
     def make_closed(self):
-        self.color = (255, 0, 0) # Red (Already checked)
+        self.color = (255, 200, 200) # Pale Red (Light Pink)
 
     def make_open(self):
-        self.color = (0, 255, 0) # Green (In the queue)
-
+        self.color = (200, 255, 200) # Pale Green (Mint)
+        
     def make_path(self):
-        self.color = (128, 0, 128) # Purple (The final path)
+        self.color = (0, 0, 255) # Blue Path (Distinct from Green Player
