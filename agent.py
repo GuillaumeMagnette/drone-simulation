@@ -302,148 +302,127 @@ class Agent:
     # --- SENSORY INPUT (THE NEW EYES) ---
 
     def get_relative_state(self, targets, projectiles, walls):
-        """
-        Returns: 
-        (target_dx, target_dy, danger_level, safety_direction, wall_x, wall_y)
-        """
-        # --- 1. WALL SENSING (Top Priority) ---
+        # --- 1. TARGET SENSING (Standard A* Lookahead) ---
+        target_dx, target_dy = 0, 0
+        target_pos = None
+        if self.path:
+            # FIX: Always aim at the IMMEDIATE next node (Index 0).
+            # This prevents cutting corners into walls.
+            target_node = self.path[0] 
+            
+            node_center = np.array([target_node.x+self.size//2, target_node.y+self.size//2])
+            
+            # Consumption Logic (Precision: 10px)
+            if np.linalg.norm(node_center - self.position) < 10:
+                self.path.pop(0)
+                self.has_eaten_node = True # Bonus flag
+                
+                # Update target immediately if path still exists
+                if self.path:
+                    target_node = self.path[0]
+            
+            target_pos = (target_node.x + self.size//2, target_node.y + self.size//2)
+        elif targets:
+            closest = self._find_closest_enemy(targets)
+            if closest: target_pos = closest.center
+            
+        if target_pos:
+            if target_pos[0] - self.rect.centerx < -10: target_dx = -1
+            elif target_pos[0] - self.rect.centerx > 10: target_dx = 1
+            if target_pos[1] - self.rect.centery < -10: target_dy = -1
+            elif target_pos[1] - self.rect.centery > 10: target_dy = 1
+
+        # --- 2. REFLEX LAYER (Scoring + Locking) ---
+        reflex_action = None 
         wall_x = 0
         wall_y = 0
-        step = 5 
         
-        rect_right = self.rect.move(step, 0)
-        if rect_right.right > 800 or rect_right.collidelist(walls) != -1: wall_x = 1
-        rect_left = self.rect.move(-step, 0)
-        if rect_left.left < 0 or rect_left.collidelist(walls) != -1: wall_x = -1
-        rect_down = self.rect.move(0, step)
-        if rect_down.bottom > 800 or rect_down.collidelist(walls) != -1: wall_y = 1
-        rect_up = self.rect.move(0, -step)
-        if rect_up.top < 0 or rect_up.collidelist(walls) != -1: wall_y = -1
+        # Skinny Sensor for Wall Detection (Prevents sticky walls)
+        sensor = self.rect.inflate(-6, -6)
+        step = 5
+        if sensor.move(0, -step).collidelist(walls) != -1 or self.rect.top < 0: wall_y = -1
+        if sensor.move(0, step).collidelist(walls) != -1 or self.rect.bottom > 800: wall_y = 1
+        if sensor.move(-step, 0).collidelist(walls) != -1 or self.rect.left < 0: wall_x = -1
+        if sensor.move(step, 0).collidelist(walls) != -1 or self.rect.right > 800: wall_x = 1
 
-        # --- 2. TARGET SENSING (A* Lookahead) ---
-        target_dx = 0
-        target_dy = 0
-        target_pos = None
-        
-        if self.path:
-            lookahead_index = min(len(self.path) - 1, 2) 
-            target_node = self.path[lookahead_index]
-            next_immediate_node = self.path[0]
-            node_center = np.array([next_immediate_node.x + self.size//2, 
-                                    next_immediate_node.y + self.size//2])
-            if np.linalg.norm(node_center - self.position) < 30:
-                self.path.pop(0)
-            target_pos = (target_node.x + self.size // 2, target_node.y + self.size // 2)
-        
-        if target_pos is None:
-            closest_enemy = self._find_closest_enemy(targets)
-            if closest_enemy: target_pos = closest_enemy.center
-
-        if target_pos:
-            tx, ty = target_pos
-            raw_dx = tx - self.rect.centerx
-            raw_dy = ty - self.rect.centery
-            if raw_dx < -10: target_dx = -1
-            elif raw_dx > 10: target_dx = 1
-            if raw_dy < -10: target_dy = -1
-            elif raw_dy > 10: target_dy = 1
-
-        # --- 3. THREAT SENSING (LOCKED COMPASS) ---
-        danger_level = 0
-        self.is_in_danger_zone = False 
-        self.danger_dist = 1000.0
-        
-        # Decrement lock timer (assuming dt ~ 0.016, we just decrement by 1 frame count or rely on main loop dt)
-        # Note: Ideally we pass dt here, but for now we just decrement by a fixed amount
-        self.dodge_timer -= 0.016 
+        # Decrement Lock Timer
+        self.dodge_timer -= 0.016
 
         closest_bullet = self._find_closest_projectile(projectiles)
-        
-        # Default to safe
-        safety_direction = 0 
+        if closest_bullet:
+            # Line of Sight Check
+            if not self._has_line_of_sight(closest_bullet.position, walls):
+                closest_bullet = None
 
         if closest_bullet:
-            dist_to_bullet = np.linalg.norm(closest_bullet.position - self.position)
+            dist = np.linalg.norm(closest_bullet.position - self.position)
             
-            if dist_to_bullet < 300:
+            if dist < 350:
+                # Trajectory Math
                 b_vel = closest_bullet.direction * closest_bullet.speed
                 p1 = closest_bullet.position
-                p2 = p1 + (b_vel * 1.5) 
-                
-                dist_from_trajectory, nx, ny = self._point_to_segment_dist(
-                    self.position[0], self.position[1],
-                    p1[0], p1[1],
-                    p2[0], p2[1]
-                )
-                self.danger_dist = dist_from_trajectory
-                
-                # --- ZONE LOGIC ---
-                critical_radius = self.size + 10 
-                warning_radius = critical_radius * 2.0 
-                
-                if dist_from_trajectory < critical_radius:
-                    danger_level = 2 
-                    self.is_in_danger_zone = True
-                elif dist_from_trajectory < warning_radius:
-                    danger_level = 1
+                p2 = p1 + (b_vel * 1.5)
+                dist_traj, _, _ = self._point_to_segment_dist(self.position[0], self.position[1], p1[0], p1[1], p2[0], p2[1])
+                self.danger_dist = dist_traj
 
-                # --- DECISION LOGIC ---
-                # Only recalculate if NOT locked or if we are SAFE
-                if self.dodge_timer <= 0 or danger_level == 0:
-                    
-                    # 1. Calculate Geometric Escape Vector (Ideal)
-                    esc_x = self.position[0] - nx
-                    esc_y = self.position[1] - ny
-                    
-                    # Perfect Center Fix
-                    if abs(esc_x) < 0.1 and abs(esc_y) < 0.1:
-                        esc_x = -b_vel[1]
-                        esc_y = b_vel[0]
-
-                    # 2. MASKING (The smart part)
-                    # If Ideal Vector points into a wall, ZERO it out.
-                    # e.g. Want Right (esc_x > 0) but Wall Right (wall_x == 1) -> esc_x = 0
-                    if esc_x > 0 and wall_x == 1: esc_x = 0
-                    if esc_x < 0 and wall_x == -1: esc_x = 0
-                    if esc_y > 0 and wall_y == 1: esc_y = 0
-                    if esc_y < 0 and wall_y == -1: esc_y = 0
-                    
-                    # 3. Determine Direction from Masked Vector
-                    calculated_dir = 0
-                    
-                    # If Vector is dead (Trapped against wall), Run Parallel
-                    if abs(esc_x) < 0.1 and abs(esc_y) < 0.1:
-                         if abs(b_vel[0]) > abs(b_vel[1]): # Horizontal Bullet
-                             if b_vel[0] > 0: calculated_dir = 4 # Run Right
-                             else:            calculated_dir = 3 # Run Left
-                         else: # Vertical Bullet
-                             if b_vel[1] > 0: calculated_dir = 2 # Run Down
-                             else:            calculated_dir = 1 # Run Up
-                    else:
-                        # Use the Masked Vector
-                        if abs(esc_x) > abs(esc_y):
-                            if esc_x < 0: calculated_dir = 3 # Left
-                            else:         calculated_dir = 4 # Right
-                        else:
-                            if esc_y < 0: calculated_dir = 1 # Up
-                            else:         calculated_dir = 2 # Down
-                    
-                    # Update the lock
-                    self.locked_safety_dir = calculated_dir
-                    
-                    # If we are in DANGER, Lock this decision for 0.2 seconds
-                    if danger_level > 0:
-                        self.dodge_timer = 0.2
+                # Hysteresis
+                enter_panic = self.size + 15
+                exit_panic  = self.size + 60 # Wide buffer to stop flicker
                 
-                # Apply the locked direction
-                safety_direction = self.locked_safety_dir
+                if dist_traj < enter_panic: self.panic_mode = True
+                elif dist_traj > exit_panic: self.panic_mode = False
                 
-                # If safe, force 0
-                if danger_level == 0:
-                    safety_direction = 0
-                    self.dodge_timer = 0 # Release lock immediately if safe
+                if self.panic_mode:
+                    # --- SCORING LOGIC ---
+                    # If we are locked and the move is still valid, keep doing it.
+                    current_lock_valid = False
+                    if self.dodge_timer > 0 and self.locked_safety_dir is not None:
+                        # Check if locked move hits wall
+                        idx = self.locked_safety_dir
+                        check_moves = [(0,-1), (0,1), (-1,0), (1,0)] # Up, Down, Left, Right
+                        dx, dy = check_moves[idx]
+                        if sensor.move(dx*step, dy*step).collidelist(walls) == -1:
+                            current_lock_valid = True
+                            reflex_action = self.locked_safety_dir
 
-        return (int(target_dx), int(target_dy), int(danger_level), int(safety_direction), int(wall_x), int(wall_y))
+                    # If no lock or lock failed, RECALCULATE best move
+                    if not current_lock_valid:
+                        best_score = -1
+                        best_action = None
+                        
+                        # Test all 4 directions (0:Up, 1:Down, 2:Left, 3:Right)
+                        moves = [
+                            (0, -10, 0), # Up
+                            (0, 10, 1),  # Down
+                            (-10, 0, 2), # Left
+                            (10, 0, 3)   # Right
+                        ]
+                        
+                        for dx, dy, action_idx in moves:
+                            # A. Wall Check
+                            if sensor.move(dx, dy).collidelist(walls) != -1:
+                                continue # Hit wall, score = 0 (implicitly skipped)
+                            if sensor.move(dx, dy).left < 0 or sensor.move(dx, dy).right > 800:
+                                continue # Hit Screen Edge
+                            if sensor.move(dx, dy).top < 0 or sensor.move(dx, dy).bottom > 800:
+                                continue 
+
+                            # B. Score = Distance from Trajectory
+                            test_x = self.position[0] + dx
+                            test_y = self.position[1] + dy
+                            score, _, _ = self._point_to_segment_dist(test_x, test_y, p1[0], p1[1], p2[0], p2[1])
+                            
+                            if score > best_score:
+                                best_score = score
+                                best_action = action_idx
+                        
+                        # Apply new decision
+                        if best_action is not None:
+                            reflex_action = best_action
+                            self.locked_safety_dir = best_action
+                            self.dodge_timer = 0.2 # Lock for 0.2s
+
+        return (target_dx, target_dy, wall_x, wall_y), reflex_action
     
     def _point_to_segment_dist(self, px, py, x1, y1, x2, y2):
         """
@@ -463,6 +442,19 @@ class Agent:
         
         dist = np.sqrt((px - nearest_x)**2 + (py - nearest_y)**2)
         return dist, nearest_x, nearest_y
+    
+    def _has_line_of_sight(self, target_pos, walls):
+        """
+        Checks if a line from self to target_pos intersects any wall.
+        Returns True if clear, False if blocked.
+        """
+        # We iterate through all walls
+        for wall in walls:
+            # clipline returns a tuple of points if the line passes through the rect
+            # It returns empty tuple () or None if no intersection
+            if wall.clipline(self.rect.center, target_pos):
+                return False # Blocked
+        return True # Clear
 
     def _find_closest_projectile(self, projectiles):
         """Helper to find the nearest bullet."""

@@ -38,14 +38,11 @@ class Node:
         self.parent = None
     def update_neighbors(self, grid):
         """
-        Checks all 8 surrounding nodes (Up, Down, Left, Right, and Diagonals).
-        Adds them to self.neighbors if they are walkable.
+        Checks all 4 surrounding nodes (Up, Down, Left, Right).
+        (Diagonals removed to prevent corner clipping)
         """
         self.neighbors = []
 
-        # We use these shorthands to make the if-statements cleaner
-        # self.row and self.col are the CURRENT node's indices
-        
         # DOWN
         if self.row < self.total_rows - 1 and not grid[self.row + 1][self.col].is_obstacle:
             self.neighbors.append(grid[self.row + 1][self.col])
@@ -62,27 +59,25 @@ class Node:
         if self.col > 0 and not grid[self.row][self.col - 1].is_obstacle:
             self.neighbors.append(grid[self.row][self.col - 1])
 
-        # --- DIAGONALS ---
+        # --- DIAGONALS (DISABLED) ---
+        # We disable these so the agent doesn't try to squeeze partially through corners.
+        # This forces the path to take wide, safe 90-degree turns.
+        
+        # if (self.row < self.total_rows - 1 and self.col < self.total_rows - 1 and 
+        #     not grid[self.row + 1][self.col + 1].is_obstacle):
+        #     self.neighbors.append(grid[self.row + 1][self.col + 1])
 
-        # DOWN-RIGHT
-        if (self.row < self.total_rows - 1 and self.col < self.total_rows - 1 and 
-            not grid[self.row + 1][self.col + 1].is_obstacle):
-            self.neighbors.append(grid[self.row + 1][self.col + 1])
+        # if (self.row < self.total_rows - 1 and self.col > 0 and 
+        #     not grid[self.row + 1][self.col - 1].is_obstacle):
+        #     self.neighbors.append(grid[self.row + 1][self.col - 1])
 
-        # DOWN-LEFT
-        if (self.row < self.total_rows - 1 and self.col > 0 and 
-            not grid[self.row + 1][self.col - 1].is_obstacle):
-            self.neighbors.append(grid[self.row + 1][self.col - 1])
+        # if (self.row > 0 and self.col < self.total_rows - 1 and 
+        #     not grid[self.row - 1][self.col + 1].is_obstacle):
+        #     self.neighbors.append(grid[self.row - 1][self.col + 1])
 
-        # UP-RIGHT
-        if (self.row > 0 and self.col < self.total_rows - 1 and 
-            not grid[self.row - 1][self.col + 1].is_obstacle):
-            self.neighbors.append(grid[self.row - 1][self.col + 1])
-
-        # UP-LEFT
-        if (self.row > 0 and self.col > 0 and 
-            not grid[self.row - 1][self.col - 1].is_obstacle):
-            self.neighbors.append(grid[self.row - 1][self.col - 1])
+        # if (self.row > 0 and self.col > 0 and 
+        #     not grid[self.row - 1][self.col - 1].is_obstacle):
+        #     self.neighbors.append(grid[self.row - 1][self.col - 1])
     
         # Add this NEW method
     def reset_visuals(self):

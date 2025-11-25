@@ -161,34 +161,62 @@ while running:
         path = a_star_algorithm(lambda: None, grid, start_node, end_node)
         if path:
             player.path = path
-            
-            # --- NEW: REMOVE THE FOG ---
-            # A* paints nodes Pink/Green. We want to erase that,
-            # keeping only the BLUE path nodes.
+             #--- SMART PRUNING (The Fix) ---
+            # Only prune the start node if we are "past" it relative to the next node.
+            if len(player.path) >= 2:
+                p0 = player.path[0]
+                p1 = player.path[1]
+                
+                # If the path says "Start at current node", check if we should skip it
+                if p0 == start_node:
+                    # Vector from P0 to P1 (The direction of the path)
+                    # Note: Node.x/y are grid indices, need to convert to pixels for direction? 
+                    # Actually simpler: Grid indices are fine for direction vector (e.g. 1, 0)
+                    # BUT we need relative position of player to P0 center in pixels.
+                    
+                    # Path Vector (e.g. Right = (1, 0))
+                    path_vec = np.array([p1.x - p0.x, p1.y - p0.y])
+                    
+                    # Player Vector relative to P0 Center
+                    p0_center = np.array([p0.x + agent_size/2, p0.y + agent_size/2])
+                    player_vec = player.position - p0_center
+                    
+                    # Dot Product: Are we on the "far side" of P0 in the direction of P1?
+                    # If Dot > 0, we are past the center, moving towards P1. -> PRUNE.
+                    # If Dot < 0, we are approaching center (or cornering). -> KEEP.
+                    dot_prod = np.dot(path_vec, player_vec)
+                    
+                    if dot_prod > 0:
+                        player.path.pop(0)
+
+            # Visual Cleanup
             for row in grid.grid:
                 for node in row:
-                    # If it's not the path and not a wall, make it white again
                     if node not in path and not node.is_obstacle:
                         node.color = (255, 255, 255)
-            # ---------------------------
 
     # --- 4. SHOOTING & PROJECTILES ---
     shoot_timer -= dt
     if shoot_timer <= 0:
         shoot_timer = SHOOT_INTERVAL
         if len(dummy_enemies) > 0:
-            new_bullet = Projectile(dummy_enemies[0].center, player.rect.center)
-            projectiles.append(new_bullet)
+            # DISTANCE CHECK
+            dist_to_player = np.linalg.norm(np.array(dummy_enemies[0].center) - player.position)
+            
+            # Only shoot if player is NOT in "Kill Range" (e.g., > 100px)
+            if dist_to_player > 100:
+                new_bullet = Projectile(dummy_enemies[0].center, player.rect.center)
+                projectiles.append(new_bullet)
 
     for bullet in projectiles[:]: 
-        bullet.update(dt)
-        if not screen.get_rect().collidepoint(bullet.position):
+        bullet.update(dt, walls)
+        if not bullet.active:
             projectiles.remove(bullet)
 
     # --- 5. RL LOOP START ---
     
     # A. Observe State
-    current_state = player.get_relative_state(dummy_enemies, projectiles, walls)
+    current_state, reflex_action = player.get_relative_state(dummy_enemies, projectiles, walls)
 
     old_danger_dist = player.danger_dist
     
@@ -196,19 +224,34 @@ while running:
     # Critical: Use the Lookahead Target, NOT the enemy, for reward alignment
     target_pos_for_reward = dummy_enemies[0].center
     if player.path:
-        idx = min(len(player.path) - 1, 2) # Match Lookahead logic
-        t_node = player.path[idx]
+        # NEW: Always reward getting closer to the IMMEDIATE next step.
+        # This ensures we reward the agent for clearing the corner.
+        t_node = player.path[0] 
         target_pos_for_reward = (t_node.x + player.size//2, t_node.y + player.size//2)
 
     old_vector = np.array(target_pos_for_reward) - player.position
     old_dist = np.linalg.norm(old_vector)
 
     # C. Choose Action (Frame Skipping)
-    if frame_count % frames_to_skip == 0:
-        action = player.choose_action(current_state)
-        current_action = action
+    action = 0
+    
+    if reflex_action is not None:
+        # --- OVERRIDE ACTIVE ---
+        # The Math Brain takes control. 
+        # We ignore the Q-Table. We ignore Epsilon.
+        action = reflex_action
+        
+        # Optional: We can still "Learn" from this!
+        # It's called "Imitation Learning". The agent observes the Reflex saving its life.
     else:
-        action = current_action
+        # --- NORMAL AI ACTIVE ---
+        # Use Q-Learning to find the path (very basic RL here, learn to follow A* path by choosing between right left up down)
+        if frame_count % frames_to_skip == 0:
+            action = player.choose_action(current_state)
+            current_action = action
+        else:
+            action = current_action
+
     frame_count += 1
     
     # D. Act
@@ -224,7 +267,7 @@ while running:
     # --- 6. RL LOOP END ---
     
     # F. Observe New State
-    next_state = player.get_relative_state(dummy_enemies, projectiles, walls)
+    next_state, _ = player.get_relative_state(dummy_enemies, projectiles, walls)
     
     # G. Calculate "New Distance" to SAME Lookahead Target
     new_vector = np.array(target_pos_for_reward) - player.position
@@ -236,29 +279,11 @@ while running:
     
     # H. Calculate Reward
     reward = -1 # Time penalty
-    
-    current_danger_level = current_state[2]
-    
-    if current_danger_level > 0:
-        # --- DANGER MODE: PROXIMITY & GRADIENT ---
-        
-        # 1. Proximity Penalty (The closer, the worse)
-        # Calculate how "Deep" we are in the danger zone (0.0 to 1.0)
-        max_threat_dist = (player.size + 10) * 2.0 # The Warning Radius
-        current_dist = max(1.0, player.danger_dist)
-        
-        urgency = 0
-        if current_dist < max_threat_dist:
-             urgency = (max_threat_dist - current_dist) / max_threat_dist
-             
-        # Max penalty -30, Min 0.
-        reward -= 30.0 * urgency
-        
-        # 2. Gradient Bonus (Reward moving AWAY)
-        # If new_dist > old_dist, we get a positive bonus
-        diff = new_danger_dist - old_danger_dist
-        reward += diff * 1.0 
-        
+
+    if reflex_action is not None:
+        # If we are in panic mode, reward is just about survival
+        # We don't punish hard, we just exist.
+        reward = 0
     else:
         # --- SAFE MODE ---
         if new_dist < old_dist:
@@ -285,10 +310,11 @@ while running:
     
      # FIX D: Walls are Sticky, Not Lava.
     if hit_wall:
-        reward = -1 # Small penalty (annoying bump)
+        #reward = -1 # Small penalty (annoying bump)
         #print("HIT WALL EDGE")
         # done = True <--- CRITICAL: DELETE OR COMMENT THIS OUT.
         # Let the physics engine slide the agent along the wall.
+        pass
 
     # Bullet Check
     for bullet in projectiles:
@@ -307,7 +333,7 @@ while running:
             break
             
     # J. Learn (Only on decision frames)
-    if frame_count % frames_to_skip == 0:
+    if reflex_action is None and frame_count % frames_to_skip == 0:
         player.learn(current_state, action, reward, next_state)
 
     # --- 7. RESET & DECAY ---

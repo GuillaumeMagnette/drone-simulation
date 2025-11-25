@@ -28,13 +28,25 @@ class Projectile:
         # Mark for deletion (if it goes off screen)
         self.active = True
 
-    def update(self, dt):
+    # Update signature to accept walls
+    def update(self, dt, walls):
         # Move in the straight line
         velocity = self.direction * self.speed
         self.position += velocity * dt
         
         # Update hitbox
         self.rect.center = self.position
+        
+        # 1. Check Wall Collisions (NEW)
+        # If we hit a wall, we are no longer active
+        if self.rect.collidelist(walls) != -1:
+            self.active = False
+            return # Stop processing
+
+        # 2. Check Screen Edge (Existing logic moved here)
+        # We assume screen size 800x800 for simplicity or pass it in
+        if not (0 <= self.position[0] <= 800 and 0 <= self.position[1] <= 800):
+            self.active = False
 
     def draw(self, screen):
         pygame.draw.circle(screen, self.color, (int(self.position[0]), int(self.position[1])), self.radius)
