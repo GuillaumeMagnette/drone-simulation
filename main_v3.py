@@ -59,20 +59,50 @@ def reset_game():
     return new_player, new_dummy_enemies, new_projectiles, new_timer
 
 
-def reset_game_state(player, dummy_enemy):
+def reset_game_state(player, dummy_enemy, grid): # <--- Added grid
     """
-    Resets positions but KEEPS the Agent object (and its Brain).
+    Resets positions randomly and RECALCULATES A* PATH.
     """
-    # Reset Player Position
-    player.position = np.array([200.0, 200.0], dtype=float)
-    player.rect.center = player.position
-    player.velocity = np.array([0.0, 0.0])
+    walls_rects = grid.get_obstacle_rects()
+
+    # Randomize Player
+    valid_pos = False
+    while not valid_pos:
+        rand_x = np.random.randint(50, SCREEN_WIDTH - 50)
+        rand_y = np.random.randint(50, SCREEN_HEIGHT - 50)
+        test_rect = pygame.Rect(rand_x, rand_y, player.size, player.size)
+        if test_rect.collidelist(walls_rects) == -1:
+            valid_pos = True
+            player.position = np.array([float(rand_x), float(rand_y)])
+            player.rect.center = player.position
+            player.velocity = np.array([0.0, 0.0])
+
+    # Randomize Enemy
+    valid_enemy = False
+    while not valid_enemy:
+        rand_ex = np.random.randint(50, SCREEN_WIDTH - 50)
+        rand_ey = np.random.randint(50, SCREEN_HEIGHT - 50)
+        dummy_enemy.topleft = (rand_ex, rand_ey)
+        if (dummy_enemy.collidelist(walls_rects) == -1 and 
+            not dummy_enemy.colliderect(player.rect)):
+            valid_enemy = True
+
+    # --- CLEAN GRID & CALCULATE A* ---
     
-    # Reset Enemy Position (Optional: Randomize later)
-    dummy_enemy.topleft = (600, 600)
+    # 1. Clean the visual mess from previous episode
+    for row in grid.grid:
+        for node in row:
+            node.reset_visuals() # <--- NEW CALL
+            node.update_neighbors(grid.grid)
+
+    # 2. Run A* (pass lambda: None to disable live drawing for speed)
+    start_node = grid.get_node_from_pos(player.rect.center)
+    end_node = grid.get_node_from_pos(dummy_enemy.center)
     
-    # Clear Projectiles
-    return [], 0.0 # Returns empty list and 0 timer
+    path = a_star_algorithm(lambda: None, grid, start_node, end_node)
+    player.path = path if path else []
+    
+    return [], 0.0
 
 
 # --- CONFIGURATION ---
@@ -102,6 +132,10 @@ while running:
         grid.draw(screen)
         player.draw(screen)
         pygame.display.flip()
+
+    # --- 2. DEFINE WALLS HERE (Top of loop) ---
+    # We calculate this once per frame so everyone (RL and Physics) can use it.
+    walls = grid.get_obstacle_rects()
 
     # --- EVENT HANDLING ---
     for event in pygame.event.get():
@@ -145,7 +179,7 @@ while running:
                     # huge chunk of time that passed while in Turbo mode.
                     clock.tick() 
                 # Reset visual state but keep brain
-                projectiles, shoot_timer = reset_game_state(player, dummy_enemies[0])
+                projectiles, shoot_timer = reset_game_state(player, dummy_enemies[0], grid)
 
             if event.key == pygame.K_e:
                 player.switch_mode()
@@ -173,7 +207,7 @@ while running:
     # --- RL LOOP START ---
     
     # 1. Observe Current State
-    current_state = player.get_relative_state(dummy_enemies, projectiles)
+    current_state = player.get_relative_state(dummy_enemies, projectiles, walls)
     
     # --- Calculate Old Distance (For Shapping) ---
     old_vector = np.array(dummy_enemies[0].center) - player.position
@@ -193,10 +227,6 @@ while running:
     # 3. Act (Move)
     player_direction_vector = player.move_discrete(action)
     
-    # Physics Update
-    # We get the painted walls so the physics engine can try to slide against them
-    # Even if we decide to kill the agent on touch, the physics update happens first
-    walls = grid.get_obstacle_rects()
     
     # Update Aim
     mouse_pos = np.array(pygame.mouse.get_pos())
@@ -207,7 +237,7 @@ while running:
     # --- RL LOOP END ---
     
     # 4. Observe New State
-    next_state = player.get_relative_state(dummy_enemies, projectiles)
+    next_state = player.get_relative_state(dummy_enemies, projectiles, walls)
     
     # --- Calculate Rewards ---
     reward = -1 # Living Penalty
@@ -283,7 +313,7 @@ while running:
         elif hit_wall: print(f"Episode End: WALL CRASH. Epsilon: {player.epsilon:.3f}")
         
         # Soft Reset
-        projectiles, shoot_timer = reset_game_state(player, dummy_enemies[0])
+        projectiles, shoot_timer = reset_game_state(player, dummy_enemies[0], grid)
 
     # --- DRAWING ---
     if SHOW_VISUALS:
