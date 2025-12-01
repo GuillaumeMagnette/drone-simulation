@@ -8,7 +8,10 @@ class Turret:
         # Center coordinates for shooting
         self.center = np.array([x + grid_size/2, y + grid_size/2])
         self.color = (150, 0, 0) # Dark Red
-        self.shoot_timer = 0.0
+        # --- FIX: INITIAL DELAY ---
+        # Don't shoot immediately. Wait 2 to 4 seconds.
+        # This gives the agent time to accelerate and scan the room.
+        self.shoot_timer = np.random.uniform(0.125, 0.25) 
         self.shoot_interval = 1.0 # Fire every 1 second
         self.range = 350.0 # Range in pixels
 
@@ -31,25 +34,28 @@ class Turret:
             if closest_target:
                 self.shoot_timer = self.shoot_interval + np.random.uniform(-0.1, 0.1)
                 
-                # --- FIX: SPAWN BULLET OUTSIDE TURRET ---
-                # 1. Calculate direction vector
+                # Vector to target
                 vec_to_target = closest_target.position - self.center
                 dist = np.linalg.norm(vec_to_target)
                 
+                # --- FIX: FIRE EVEN IF CLOSE ---
                 if dist > 0:
                     direction = vec_to_target / dist
                     
-                    # 2. Push spawn point out by (Turret Radius + Bullet Radius + Buffer)
-                    # Turret is 20px wide (radius 10). Bullet is radius 5. Buffer 2.
-                    spawn_offset = 18.0 
+                    # Reduce spawn offset to ensure we hit point-blank targets
+                    # Turret radius 10. Bullet radius 5. 
+                    # If offset is too big, we spawn PAST the agent.
+                    # If offset is too small, we hit ourselves.
+                    
+                    # Logic: If target is super close (< 30px), spawn bullet INSIDE turret
+                    # but ignore turret collision for 5 frames (requires complex projectile logic).
+                    
+                    # SIMPLER FIX: Just spawn it.
+                    spawn_offset = 15.0 
                     spawn_pos = self.center + (direction * spawn_offset)
                     
-                    # 3. Fire
-                    p = Projectile(spawn_pos, closest_target.position, speed=250.0)
+                    p = Projectile(spawn_pos, closest_target.position, speed=300.0)
                     projectiles.append(p)
-                    
-                    # Optional: Debug Print to confirm firing
-                    print("TURRET FIRED!")
 
     def draw(self, screen):
         pygame.draw.rect(screen, self.color, self.rect)

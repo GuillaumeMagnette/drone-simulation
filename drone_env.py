@@ -2,80 +2,54 @@ import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
 import pygame
+import os
 from grid import Grid
 from agent import Agent
 from projectile import Projectile
+from turret import Turret
 from algorithm import a_star_algorithm
-from swarm import FollowerDrone
-import os
 
 class DroneEnv(gym.Env):
-    """
-    Combat Drone Environment.
-    Task: Navigate maze, dodge bullets, reach target.
-    """
     metadata = {'render_modes': ['human']}
 
     def __init__(self, render_mode=None):
         super(DroneEnv, self).__init__()
-
-        # --- CONFIGURATION ---
         self.SCREEN_WIDTH = 800
         self.SCREEN_HEIGHT = 800
-        self.PIXEL_SIZE = 10      # Size of one square (10px)
-        self.ROWS = int(self.SCREEN_WIDTH / self.PIXEL_SIZE) # 80 Rows
-
+        self.PIXEL_SIZE = 10
+        self.ROWS = int(self.SCREEN_WIDTH / self.PIXEL_SIZE)
         self.render_mode = render_mode
         self.screen = None
         self.clock = None
         
-        # NEW: Make it slightly smaller (34px) to fit through doors easily
-        agent_size = 14
+        # --- SCALE ---
+        agent_size = 14 
         self.agent = Agent(200, 200, agent_size)
-
-        self.num_followers = 5
-
-        # --- ACTION SPACE ---
-        # [Force_X, Force_Y]
-        self.action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
-
-        # --- OBSERVATION SPACE ---
-        # 1. Lidar (8)
-        # 2. Velocity (2)
-        # 3. GPS to Next Waypoint (2)
-        # 4. Vector to Closest Bullet (2) <--- NEW
-        # Total = 14 inputs
-        self.observation_space = spaces.Box(low=-1, high=1, shape=(14,), dtype=np.float32)
-
-        # --- ENV SETUP ---
-        # PASS 'ROWS' (80), NOT PIXEL_SIZE (10)
-        self.grid = Grid(self.ROWS, self.SCREEN_WIDTH) 
-
-        self.target = pygame.Rect(600, 600, 40, 40)
         
-        self.projectiles = []
-        self.shoot_timer = 0.0
-        self.walls = []
+        self.action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+        # --- UPDATE: 28 INPUTS ---
+        # 8 Lidar + 2 Vel + 2 GPS + 8 Bullets + 8 Neighbors = 28
+        self.observation_space = spaces.Box(low=-1, high=1, shape=(28,), dtype=np.float32)
 
-        # --- LOGGING VARS ---
+        self.grid = Grid(self.ROWS, self.SCREEN_WIDTH)
+        self.target = pygame.Rect(600, 600, 40, 40)
+        self.projectiles = []
+        self.turrets = []
+        self.walls = []
+        
+        # Config
+        self.repath_interval = 20
+        self.max_steps = 2000
+        
+        # Logging
         self.cum_reward_dist = 0
         self.cum_reward_time = 0
         self.cum_penalty_collision = 0
-        self.cum_reward_win = 0 # <--- ADD THIS
+        self.cum_reward_win = 0
         self.episode_count = 0
-        self.termination_reason = "Timeout" # Default reason
-
-        # --- TIMEOUT CONFIG ---
-        self.max_steps = 2000  # 2000 frames @ 60fps = ~33 seconds
-        self.current_step = 0
-
-        # --- PATHFINDING TIMER ---
-        self.repath_steps = 0
-        self.repath_interval = 20 # Run A* every 20 frames (approx 0.3 seconds)
+        self.termination_reason = "Timeout"
         
-        # --- LOG FILE SETUP ---
         self.log_file = "training_log.csv"
-        # Create file with header if it doesn't exist
         if not os.path.exists(self.log_file):
             with open(self.log_file, "w") as f:
                 f.write("Episode,DistReward,TimeReward,CollReward,TotalReward,Reason\n")
@@ -83,36 +57,34 @@ class DroneEnv(gym.Env):
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         
-        # 1. Log Previous Episode Stats
+        # Log Logic
         if self.episode_count > 0:
             total = self.cum_reward_dist + self.cum_reward_time + self.cum_penalty_collision + self.cum_reward_win
-            
-            # Console Print
-            print(f"Ep {self.episode_count} | Dist: {self.cum_reward_dist:.1f} | Time: {self.cum_reward_time:.1f} | Coll: {self.cum_penalty_collision} | TOT: {total:.1f} | {self.termination_reason}")
-            
-            # File Write (Append Mode)
             with open(self.log_file, "a") as f:
                 f.write(f"{self.episode_count},{self.cum_reward_dist:.2f},{self.cum_reward_time:.2f},{self.cum_penalty_collision},{total:.2f},{self.termination_reason}\n")
 
-        # 2. Reset Counters & State
         self.cum_reward_dist = 0
         self.cum_reward_time = 0
         self.cum_penalty_collision = 0
-        self.cum_reward_win = 0 # <--- RESET THIS
+        self.cum_reward_win = 0
         self.episode_count += 1
         self.termination_reason = "Timeout"
         
         self.current_step = 0
-        self.repath_steps = 0 # <--- Reset Repath Timer
+        self.repath_steps = 0
         
-        # 3. Environment Reset
+        # Reset World
         self.grid = Grid(self.ROWS, self.SCREEN_WIDTH)
         self._randomize_walls()
         self.walls = self.grid.get_obstacle_rects()
         
         self.projectiles = []
-        self.shoot_timer = 2.0 
+        self.turrets = []
         
+        # SPAWN 0 - 2 - 8 TURRETS (Training Curriculum)
+        for _ in range(8): 
+            self._spawn_turret()
+
         self.agent.velocity[:] = 0
         self.agent.acceleration[:] = 0
         self.agent.path = []
@@ -120,41 +92,47 @@ class DroneEnv(gym.Env):
         self._spawn_entities()
         self._recalc_path()
         
-        # 4. Initialize Differential Tracker
         self.last_dist = np.linalg.norm(np.array(self.target.center) - self.agent.position)
         
-        observation = self._get_obs()
-        return observation, {}
+        return self._get_obs(), {}
 
     def step(self, action):
         # 1. Increment Counters
         self.current_step += 1
-        self.repath_steps += 1 # <--- Increment Repath Timer
+        self.repath_steps += 1
         
         # 2. Apply Physics
         force = action * self.agent.max_force
         self.agent.apply_force(force)
         self.agent.update_physics(0.016)
+        
+        # Sync hitbox
         self.agent.rect.center = self.agent.position
         
-        self.agent._handle_collisions(self.walls)
-
-        # --- UPDATE SWARM ---
-        # Fixed dt = 0.016
-        for drone in self.followers:
-            drone.update(0.016, self.agent.position, self.followers, self.walls)
+        # --- 3. HARDCORE LETHAL WALLS (No Sliding) ---
+        hit_wall = False
         
-        # 3. Combat Logic
-        self.shoot_timer -= 0.016
-        if self.shoot_timer <= 0:
-            self.shoot_timer = 2.0
-            p = Projectile(self.target.center, self.agent.position)
-            self.projectiles.append(p)
+        # A. Screen Boundaries
+        if (self.agent.rect.left < 0 or self.agent.rect.right > self.SCREEN_WIDTH or
+            self.agent.rect.top < 0 or self.agent.rect.bottom > self.SCREEN_HEIGHT):
+            hit_wall = True
+            
+        # B. Obstacles (Buildings & Turrets)
+        if not hit_wall: 
+            if self.agent.rect.collidelist(self.walls) != -1:
+                hit_wall = True
+
+        # NOTE: We REMOVED self.agent._handle_collisions()
+        # The penalty block below handles the result.
+
+        # 4. Combat & Projectiles Logic
+        for t in self.turrets:
+            t.update(0.016, [self.agent], self.projectiles, self.walls)
             
         hit_bullet = False
         for p in self.projectiles[:]:
             p.update(0.016, self.walls)
-            if not p.active:
+            if not p.active: 
                 self.projectiles.remove(p)
                 continue
             
@@ -162,77 +140,108 @@ class DroneEnv(gym.Env):
                 hit_bullet = True
                 self.projectiles.remove(p)
 
-        # 4. Path Logic (Dynamic Updates)
-        
-        # A. Periodic Repathing (The Fix)
+        # 5. Pathing Logic
         if self.repath_steps >= self.repath_interval:
             self.repath_steps = 0
             self._recalc_path()
 
-        # B. Waypoint Management
         if self.agent.path:
-            target_node = self.agent.path[0]
-            t_pos = np.array([target_node.x + self.agent.size/2, target_node.y + self.agent.size/2])
-            
-            # If close to node, pop it
-            if np.linalg.norm(t_pos - self.agent.position) < 30:
+            t_node = self.agent.path[0]
+            t_pos = np.array([t_node.x+7, t_node.y+7])
+            if np.linalg.norm(t_pos - self.agent.position) < 20:
                 self.agent.path.pop(0)
-        
-        # C. Emergency Recalc (if path empty but not at target)
-        if not self.agent.path: 
-            self._recalc_path()
+        if not self.agent.path: self._recalc_path()
 
-        # 5. Reward Calculation
+        # 6. Generate Observation
+        observation = self._get_obs()
+
+        # 7. Rewards Calculation
         step_reward = 0
         terminated = False
         truncated = False
         
-        # Progress Reward
-        current_dist = np.linalg.norm(np.array(self.target.center) - self.agent.position)
-        progress = self.last_dist - current_dist
-        self.last_dist = current_dist
+        # A. Progress Reward
+        cur_dist = np.linalg.norm(np.array(self.target.center) - self.agent.position)
+        progress = self.last_dist - cur_dist
+        self.last_dist = cur_dist
         
-        r_dist = progress * 0.1 
-        step_reward += r_dist
-        self.cum_reward_dist += r_dist
+        # Slightly reduced progress reward to emphasize survival
+        step_reward += progress * 0.1 
+        self.cum_reward_dist += progress * 0.1
         
-        # Time Penalty
-        r_time = -0.05 
-        step_reward += r_time
-        self.cum_reward_time += r_time
+        # B. Time Penalty
+        step_reward -= 0.05
+        self.cum_reward_time -= 0.05
         
-        # Combat Penalty
-        if hit_bullet:
-            r_coll = -50
-            step_reward += r_coll
-            self.cum_penalty_collision += r_coll
-            terminated = True
-            self.termination_reason = "Died"
-            print("   -> DIED (Shot)")
+        # C. Trajectory Pain (INCREASED WEIGHT)
+        danger_penalty = 0
+        for p in self.projectiles:
+            # Visual Check
+            if not self.agent._has_line_of_sight(p.position, self.walls):
+                continue
+
+            vec_to_agent = self.agent.position - p.position
+            dist_raw = np.linalg.norm(vec_to_agent)
             
-        # Victory Reward
-        if self.agent.rect.colliderect(self.target):
-            r_win = 100
-            step_reward += r_win
-            self.cum_reward_win += r_win # <--- ADD THIS
+            if dist_raw < 150.0:
+                forward_dist = np.dot(vec_to_agent, p.direction)
+                if forward_dist > 0:
+                    sq_term = (dist_raw**2) - (forward_dist**2)
+                    miss_dist = np.sqrt(max(0, sq_term))
+                    safety_radius = 25.0
+                    
+                    if miss_dist < safety_radius:
+                        intensity = 1.0 - (miss_dist / safety_radius)
+                        proximity_multiplier = 1.0 - (dist_raw / 150.0)
+                        danger_penalty -= (intensity * proximity_multiplier)
+                        
+        # WEIGHT INCREASED: Was 0.5, Now 1.0 (Same importance as movement)
+        step_reward += (danger_penalty * 1.0)
+
+        # D. Stall Penalty (Strict)
+        speed = np.linalg.norm(self.agent.velocity)
+        # If moving slow AND not at target AND not dead yet
+        if speed < 30.0 and cur_dist > 50.0 and not hit_wall and not hit_bullet:
+            step_reward -= 0.5 
+        
+        # E. Wall Hugging Penalty (Optional Polish)
+        # 0-7 are Lidar rays. If < 0.15 (very close), apply stress.
+        if np.min(observation[0:8]) < 0.15:
+            step_reward -= 0.1
+
+        # --- TERMINAL STATES ---
+
+        # 1. Wall Death (The New Reality)
+        if hit_wall:
+            step_reward -= 50
+            self.cum_penalty_collision -= 50
+            terminated = True
+            self.termination_reason = "Crashed" # Wall Death
+            # print("   -> CRASHED (Wall)")
+
+        # 2. Bullet Death
+        elif hit_bullet:
+            step_reward -= 50
+            self.cum_penalty_collision -= 50
+            terminated = True
+            self.termination_reason = "Died" # Shot
+            # print("   -> DIED (Shot)")
+            
+        # 3. Victory
+        elif self.agent.rect.colliderect(self.target):
+            step_reward += 100
+            self.cum_reward_win += 100
             terminated = True
             self.termination_reason = "Success"
-            print("   -> SUCCESS")
+            # print("   -> SUCCESS")
 
-        # 6. Timeout Check
-        if not terminated:
-            if self.current_step >= self.max_steps:
-                truncated = True
-                self.termination_reason = "Timeout"
+        # 4. Timeout
+        if not terminated and self.current_step >= self.max_steps:
+            truncated = True
+            self.termination_reason = "Timeout"
 
-        # 7. Finalize
-        observation = self._get_obs()
-        info = {}
-        
-        if self.render_mode == "human":
-            self.render()
-            
-        return observation, step_reward, terminated, truncated, info
+        if self.render_mode == "human": self.render()
+        return observation, step_reward, terminated, truncated, {}
 
     def _get_obs(self):
         # 1. Lidar (8)
@@ -244,43 +253,31 @@ class DroneEnv(gym.Env):
         # 3. GPS (2)
         if self.agent.path:
             node = self.agent.path[0]
-            wp = np.array([node.x + self.agent.size/2, node.y + self.agent.size/2])
-        else:
-            wp = np.array(self.target.center)
-        vec_to_wp = wp - self.agent.position
-        dist_wp = np.linalg.norm(vec_to_wp)
-        if dist_wp > 0: vec_to_wp /= dist_wp
+            wp = np.array([node.x + 7, node.y + 7])
+        else: wp = np.array(self.target.center)
+        vec_wp = wp - self.agent.position
+        d_wp = np.linalg.norm(vec_wp)
+        if d_wp > 0: vec_wp /= d_wp
         
-        # 4. Bullet Sensor (2) <--- UPDATED WITH LINE OF SIGHT
-        # Find closest bullet THAT IS VISIBLE
-        closest_bullet_vec = np.array([0.0, 0.0])
-        min_dist = 400.0 # Sensing range
+        # --- UPDATE: 8 SECTORS ---
+        # 4. Bullet Sectors (8)
+        vis_bullets = [p for p in self.projectiles if self.agent._has_line_of_sight(p.position, self.walls)]
+        bul_sec = self.agent.get_sector_readings(vis_bullets, radius=300.0, num_sectors=8)
         
-        for p in self.projectiles:
-            vec = p.position - self.agent.position
-            dist = np.linalg.norm(vec)
-            
-            # Check distance first (Cheap)
-            if dist < min_dist:
-                # Check Line of Sight (Expensive but necessary)
-                # This prevents the agent from dodging bullets behind walls
-                if self.agent._has_line_of_sight(p.position, self.walls):
-                    min_dist = dist
-                    closest_bullet_vec = vec / dist # Normalized direction to threat
-                
-        return np.concatenate([lidar, vel, vec_to_wp, closest_bullet_vec]).astype(np.float32)
+        # 5. Neighbor Sectors (8)
+        # (Empty for single training, but must match shape)
+        nei_sec = np.ones(8, dtype=np.float32) 
+        
+        return np.concatenate([lidar, vel, vec_wp, bul_sec, nei_sec]).astype(np.float32)
 
     def _randomize_walls(self):
-        rows = self.grid.rows # Should be 80 now
-        
-        block_size = 10   # 10 * 10px = 100px buildings
-        street_width = 6  # 6 * 10px = 60px streets
-        
+        rows = self.grid.rows
+        block_size = 12
+        street_width = 6
         for x in range(2, rows - block_size, block_size + street_width):
             for y in range(2, rows - block_size, block_size + street_width):
                 b_w = np.random.randint(block_size - 4, block_size)
                 b_h = np.random.randint(block_size - 4, block_size)
-                
                 for i in range(b_w):
                     for j in range(b_h):
                         if x+i < rows and y+j < rows:
@@ -288,8 +285,9 @@ class DroneEnv(gym.Env):
 
     def _spawn_entities(self):
         self.walls = self.grid.get_obstacle_rects()
+        # Add turrets to walls for collision
+        for t in self.turrets: self.walls.append(t.rect)
         
-        # 1. Spawn Leader (Existing Code)
         while True:
             rx = np.random.randint(50, self.SCREEN_WIDTH - 50)
             ry = np.random.randint(50, self.SCREEN_HEIGHT - 50)
@@ -297,73 +295,66 @@ class DroneEnv(gym.Env):
             self.agent.rect.center = self.agent.position
             if self.agent.rect.collidelist(self.walls) == -1: break
             
-        # 2. Spawn Followers
-        self.followers = []
-        for _ in range(self.num_followers):
-            drone = FollowerDrone(self.agent.position[0], self.agent.position[1], self.agent.size)
-            # Add tiny random offset so they separate quickly
-            offset = np.random.uniform(-20, 20, size=2)
-            drone.position += offset
-            self.followers.append(drone)
-            
-        # 3. Target
         while True:
             tx = np.random.randint(50, self.SCREEN_WIDTH - 50)
             ty = np.random.randint(50, self.SCREEN_HEIGHT - 50)
             self.target.topleft = (tx, ty)
-            if (self.target.collidelist(self.walls) == -1 and 
-                not self.target.colliderect(self.agent.rect)): break
+            if self.target.collidelist(self.walls) == -1 and not self.target.colliderect(self.agent.rect): break
+
+    def _spawn_turret(self):
+        while True:
+            # Random position
+            x = np.random.randint(50, 750)
+            y = np.random.randint(50, 750)
+            
+            # Snap to grid
+            gx = (x // 10) * 10
+            gy = (y // 10) * 10
+            
+            # --- FIX: DISTANCE CHECK ---
+            # Create a temporary vector for the proposed turret location
+            turret_pos = np.array([gx + 10, gy + 10]) # Center of turret
+            dist_to_agent = np.linalg.norm(turret_pos - self.agent.position)
+            
+            # If too close to start (e.g. 300px), try again
+            if dist_to_agent < 300.0:
+                continue
+            # ---------------------------
+
+            # Check overlap with walls
+            test_rect = pygame.Rect(gx, gy, 20, 20)
+            if test_rect.collidelist(self.walls) == -1:
+                t = Turret(gx, gy, 20)
+                self.turrets.append(t)
+                self.walls.append(t.rect)
+                break
 
     def _recalc_path(self):
-        # Clear visuals
-        for row in self.grid.grid:
-            for node in row: 
-                node.reset_visuals()
-                node.update_neighbors(self.grid.grid)
-                
-        start_node = self.grid.get_node_from_pos(self.agent.position)
-        end_node = self.grid.get_node_from_pos(self.target.center)
-        
-        if start_node and end_node:
-            self.agent.path = a_star_algorithm(None, self.grid, start_node, end_node)
+        start = self.grid.get_node_from_pos(self.agent.position)
+        end = self.grid.get_node_from_pos(self.target.center)
+        if start and end and not start.is_obstacle:
+            path = a_star_algorithm(None, self.grid, start, end)
+            if path: self.agent.path = path
 
     def render(self):
+        if self.render_mode != "human": return
         if self.screen is None:
             pygame.init()
             self.screen = pygame.display.set_mode((self.SCREEN_WIDTH, self.SCREEN_HEIGHT))
             self.clock = pygame.time.Clock()
-
+        
         for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                self.close()
-                exit()
+            if event.type == pygame.QUIT: quit()
 
         self.screen.fill((255, 255, 255))
         self.grid.draw(self.screen)
-        
-        if self.agent.path:
-            for node in self.agent.path: node.make_path()
-            
-        pygame.draw.rect(self.screen, (255, 0, 0), self.target)
-
-        # Draw Followers
-        for drone in self.followers:
-            drone.draw(self.screen)
-            
-        # Draw Leader
+        pygame.draw.rect(self.screen, (0, 255, 0), self.target)
+        for t in self.turrets: t.draw(self.screen)
+        for p in self.projectiles: p.draw(self.screen)
         self.agent.draw_lidar(self.screen, self.walls)
         self.agent.draw(self.screen)
-        
-        # Draw Projectiles
-        for p in self.projectiles:
-            p.draw(self.screen)
-            
-        self.agent.draw_lidar(self.screen, self.walls)
-        self.agent.draw(self.screen)
-        
         pygame.display.flip()
         self.clock.tick(60)
-
+        
     def close(self):
-        if self.screen is not None:
-            pygame.quit()
+        if self.screen: pygame.quit()

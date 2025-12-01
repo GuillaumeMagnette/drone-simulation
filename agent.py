@@ -14,8 +14,8 @@ class PhysicsEntity:
         self.max_speed = max_speed
         self.max_force = max_force
         # Friction: 1.0 = No Friction, 0.9 = High Friction. 
-        # 0.96 feels like a slippery drone.
-        self.friction = 0.96  
+        # Friction: 0.96 was too slippery. 0.88 allows for "Juking" (Instant stops).
+        self.friction = 0.88  
 
     def apply_force(self, force):
         # Newton's 2nd Law: F = ma -> a = F/m
@@ -42,8 +42,8 @@ class PhysicsEntity:
 # --- THE AGENT ---
 class Agent(PhysicsEntity):
     def __init__(self, x, y, size):
-        # Initialize Physics (Mass=1.5 makes it feel weighty)
-        super().__init__(x, y, mass=1.5, max_speed=350.0, max_force=2000.0)
+        # Lighter mass = faster acceleration
+        super().__init__(x, y, mass=1.0, max_speed=360.0, max_force=2500.0)
         
         self.size = size
         # Visuals: Agent is Green by default
@@ -421,6 +421,43 @@ class Agent(PhysicsEntity):
             pygame.draw.line(screen, color, (cx, cy), (end_x, end_y), 1)
             pygame.draw.circle(screen, color, (int(end_x), int(end_y)), 3)
 
+    # --- NEW SENSOR LOGIC (8 SECTORS) ---
+    def get_sector_readings(self, entities, radius=300.0, num_sectors=8):
+        """
+        Returns N floats. 0.0 = DANGER (Touching). 1.0 = SAFE.
+        Sectors start at West (-X) and rotate counter-clockwise (or similar depending on atan2).
+        """
+        readings = np.ones(num_sectors, dtype=np.float32)
+        sector_angle = (2 * np.pi) / num_sectors
+        
+        for e in entities:
+            if hasattr(e, 'position'): pos = e.position
+            else: pos = np.array(e.center)
+
+            diff = pos - self.position
+            dist = np.linalg.norm(diff)
+            
+            if dist < radius:
+                # 1. Normalize Distance (0=Close, 1=Far)
+                norm_dist = dist / radius
+                
+                # 2. Calculate Angle (-pi to pi)
+                angle = np.arctan2(diff[1], diff[0]) 
+                
+                # Map to 0 to 2pi
+                angle += np.pi 
+                
+                # 3. Determine Sector Index
+                idx = int(angle / sector_angle)
+                idx = idx % num_sectors # Clamp
+                
+                # 4. Keep smallest distance in this sector
+                if norm_dist < readings[idx]:
+                    readings[idx] = norm_dist
+                    
+        return readings
+    
+    
     def _find_closest_enemy(self, enemies):
         closest = None
         min_dist = float('inf')
