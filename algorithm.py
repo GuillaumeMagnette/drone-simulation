@@ -50,7 +50,20 @@ def a_star_algorithm(draw_func, grid, start, end):
             return path
 
         for neighbor in current.neighbors:
-            temp_g_score = g_score[current] + 1 
+            # New: Add the neighbor's weight (1.0 for open, 10.0 for near wall)
+            temp_g_score = g_score[current] + neighbor.weight 
+            # ----------------------
+
+            if temp_g_score < g_score[neighbor]:
+                came_from[neighbor] = current
+                g_score[neighbor] = temp_g_score
+                f_score[neighbor] = temp_g_score + heuristic((neighbor.row, neighbor.col), (end.row, end.col))
+                
+                if neighbor not in open_set_hash:
+                    count += 1
+                    open_set.put((f_score[neighbor], count, neighbor))
+                    open_set_hash.add(neighbor)
+                    neighbor.make_open()
 
             if temp_g_score < g_score[neighbor]:
                 came_from[neighbor] = current

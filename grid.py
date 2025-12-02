@@ -17,6 +17,43 @@ class Grid:
                 node = Node(i, j, self.grid_size, self.rows)
                 grid[i].append(node)
         return grid
+    def apply_costmap(self):
+        """
+        Creates a 'Safety Cushion' around obstacles.
+        Standard Nodes: Weight 1.0
+        Danger Zones: Weight 10.0 (A* will avoid unless necessary)
+        """
+        # 1. Reset all weights to 1.0
+        for row in self.grid:
+            for node in row:
+                node.weight = 1.0
+
+        # 2. Find all walls
+        walls = []
+        for x in range(self.rows):
+            for y in range(self.rows):
+                if self.grid[x][y].is_obstacle:
+                    walls.append((x, y))
+
+        # 3. Inflate costs around walls
+        # Padding = 2 cells (approx 20 pixels safety margin)
+        padding = 2 
+        
+        for wx, wy in walls:
+            for dx in range(-padding, padding + 1):
+                for dy in range(-padding, padding + 1):
+                    nx, ny = wx + dx, wy + dy
+                    
+                    # Bounds check
+                    if 0 <= nx < self.rows and 0 <= ny < self.rows:
+                        node = self.grid[nx][ny]
+                        
+                        # Only affect empty space, don't change walls
+                        if not node.is_obstacle:
+                            # Set high cost so A* treats it like "mud" or "danger"
+                            node.weight = 10.0 
+                            # Optional: Visual Debug
+                            # if node.color == (255, 255, 255): node.color = (240, 240, 240)
 
     def draw_grid_lines(self, screen):
         """Draws the grey lines for the grid visualization."""

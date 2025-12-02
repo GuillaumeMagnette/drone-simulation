@@ -353,7 +353,10 @@ class Agent(PhysicsEntity):
         """
         Casts 'num_rays' evenly spaced around the agent.
         Returns: A numpy array of distances [0.0 to 1.0], where 1.0 is far, 0.0 is touching.
+        Now also detects screen boundaries as walls.
         """
+        SCREEN_SIZE = 800
+        
         # 1. Define angles (0 to 2pi)
         angles = np.linspace(0, 2 * np.pi, num_rays, endpoint=False)
         
@@ -363,39 +366,55 @@ class Agent(PhysicsEntity):
         distances = []
         
         for angle in angles:
-            # Calculate end point of the ray
+            # Calculate direction
             dx = np.cos(angle)
             dy = np.sin(angle)
             
-            # End point is max_dist away
-            end_x = cx + dx * max_dist
-            end_y = cy + dy * max_dist
-            
             closest_dist = max_dist
             
-            # Ray line segment
+            # Ray line segment for wall checks
+            end_x = cx + dx * max_dist
+            end_y = cy + dy * max_dist
             ray_start = (cx, cy)
             ray_end = (end_x, end_y)
             
-            # Check intersection with every wall
+            # --- CHECK SCREEN BOUNDARIES FIRST ---
+            # Left edge (x = 0)
+            if dx < 0 and cx > 0:
+                dist_to_edge = cx / -dx
+                if dist_to_edge < closest_dist:
+                    closest_dist = dist_to_edge
+            
+            # Right edge (x = SCREEN_SIZE)
+            if dx > 0 and cx < SCREEN_SIZE:
+                dist_to_edge = (SCREEN_SIZE - cx) / dx
+                if dist_to_edge < closest_dist:
+                    closest_dist = dist_to_edge
+            
+            # Top edge (y = 0)
+            if dy < 0 and cy > 0:
+                dist_to_edge = cy / -dy
+                if dist_to_edge < closest_dist:
+                    closest_dist = dist_to_edge
+            
+            # Bottom edge (y = SCREEN_SIZE)
+            if dy > 0 and cy < SCREEN_SIZE:
+                dist_to_edge = (SCREEN_SIZE - cy) / dy
+                if dist_to_edge < closest_dist:
+                    closest_dist = dist_to_edge
+            
+            # --- CHECK WALLS ---
             for wall in walls:
-                # clipline returns the segment of the line INSIDE the rect
-                # If it returns a value, we hit the wall
                 clipped = wall.clipline(ray_start, ray_end)
                 
                 if clipped:
-                    # clipped[0] is the entry point (closest to start)
-                    # clipped[1] is the exit point
-                    
-                    # Calculate distance to entry point
                     hit_x, hit_y = clipped[0]
                     dist = np.sqrt((hit_x - cx)**2 + (hit_y - cy)**2)
                     
                     if dist < closest_dist:
                         closest_dist = dist
             
-            # Normalize (1.0 = Max Range, 0.0 = Touching Wall)
-            # In RL, inputs between 0 and 1 are best.
+            # Normalize (1.0 = Max Range, 0.0 = Touching)
             norm_dist = closest_dist / max_dist
             distances.append(norm_dist)
             

@@ -11,6 +11,9 @@ class Node:
         self.grid_size = grid_size
         self.total_rows = total_rows
         self.is_obstacle = False
+
+        # --- NEW: MOVEMENT COST ---
+        self.weight = 1.0 # Default cost (1.0 = Safe Open Space)
         
         # A* properties
         self.g_cost = float('inf')
