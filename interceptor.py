@@ -10,15 +10,18 @@ class Interceptor:
         # --- PHYSICS: GUIDED MISSILE TUNING ---
         self.mass = 1.0
         
-        # Extremely Fast
-        self.max_speed = 600.0   
+        # Extremely Fast (Slightly reduced from 600 for balance)
+        self.max_speed = 550.0   
         
-        # Moderate Force: Takes time to change direction at high speed
-        # This creates the "Wide Turn" arc.
-        self.max_force = 1500.0  
+        # Moderate Force (Reduced from 1500 for wider turn radius)
+        # This makes it harder for the missile to do a 180 snap-turn
+        self.max_force = 1200.0  
         
         # NO DRAG: It never slows down naturally.
         self.friction = 1.0      
+        
+        # NEW: Fuel / Lifetime (Seconds)
+        self.lifetime = 4.0
         
         self.size = size
         self.rect = pygame.Rect(0, 0, self.size, self.size)
@@ -30,6 +33,12 @@ class Interceptor:
 
     def update(self, dt, blue_drones, walls):
         if not self.alive: return
+        
+        # --- NEW: FUEL LOGIC ---
+        self.lifetime -= dt
+        if self.lifetime <= 0:
+            self._die()
+            return
             
         target = self._find_target(blue_drones)
         
@@ -69,6 +78,7 @@ class Interceptor:
         closest = None
         min_dist = self.detection_range
         for drone in blue_drones:
+            # Ignore dead drones (black color check is a hack, but works for now)
             if hasattr(drone, 'color') and drone.color == (0,0,0): continue
             
             dist = np.linalg.norm(drone.position - self.position)
@@ -91,6 +101,9 @@ class Interceptor:
         self.alive = False
         self.color = (100, 100, 100) # Grey smoke
         self.velocity[:] = 0
+        # Move offscreen immediately to prevent ghost collisions
+        self.position = np.array([-1000.0, -1000.0])
+        self.rect.center = self.position
         
     def draw(self, screen):
         if not self.alive: return
