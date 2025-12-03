@@ -65,8 +65,8 @@ class DroneEnv(gym.Env):
         self.interceptors = []
         # --- MISSILE BATTERY CONFIG ---
         self.missile_timer = 0.0
-        self.missile_interval = 1  # Launch every 1 seconds
-        self.max_interceptors = 5    # Max active missiles at once
+        self.missile_interval = 1.0  # Seconds between launches
+        self.max_interceptors = 5    # Default, overridden by curriculum in reset()
 
         self.projectiles = []  # Reserved for future use
         
@@ -86,15 +86,8 @@ class DroneEnv(gym.Env):
         self.cum_reward_win = 0
         self.episode_count = 0
         self.termination_reason = "Timeout"
-
-        # --- PROFILER STATS ---
-        self.timers = {
-            'physics': 0.0,
-            'interceptors': 0.0,
-            'pathing': 0.0,
-            'observation': 0.0,
-            'steps': 0
-        }
+        
+        # Logging (can be disabled by setting log_file = None)
         
         self.log_file = "training_log.csv"
         if not os.path.exists(self.log_file):
@@ -122,8 +115,8 @@ class DroneEnv(gym.Env):
         
         self.current_map_type = map_type
         
-        # Log previous episode
-        if self.episode_count > 0:
+        # Log previous episode (skip if logging disabled)
+        if self.episode_count > 0 and self.log_file:
             total = self.cum_reward_dist + self.cum_reward_time + self.cum_penalty_collision + self.cum_reward_win
             with open(self.log_file, "a") as f:
                 f.write(f"{self.episode_count},{self.current_map_type},{len(self.interceptors)},"
@@ -164,15 +157,18 @@ class DroneEnv(gym.Env):
         
         # Reset entities
         self.interceptors = []
-        self.missile_timer = 0.5 # First launch after 1 second (give player time to move)
+        self.missile_timer = 0.0  # Ready to fire immediately when LOS acquired
         self.projectiles = []
+        
+        # Set max interceptors based on curriculum (disables battery if 0)
+        self.max_interceptors = num_interceptors
         
         # Spawn agent and target first
         self._spawn_agent_and_target()
         
-        # Then spawn interceptors (need agent position for distance check)
-        for _ in range(num_interceptors):
-            self._spawn_interceptor()
+        # NOTE: Don't spawn interceptors here anymore!
+        # The missile battery in step() handles staggered spawning.
+        # This creates sustained pressure instead of an initial burst.
         
         # Reset agent state
         self.agent.velocity[:] = 0
@@ -188,9 +184,6 @@ class DroneEnv(gym.Env):
         return self._get_obs(), {}
 
     def step(self, action):
-        t0 = time.perf_counter()
-
-
         self.current_step += 1
         self.repath_steps += 1
         
@@ -210,14 +203,32 @@ class DroneEnv(gym.Env):
         if not hit_wall and self.agent.rect.collidelist(self.walls) != -1:
             hit_wall = True
         
-        t1 = time.perf_counter()
-        # --- MISSILE BATTERY LOGIC (NEW) ---
-        # Decrement timer and spawn if ready and under cap
+        # --- MISSILE BATTERY LOGIC ---
         self.missile_timer -= 0.016
         if self.missile_timer <= 0:
-            self.missile_timer = self.missile_interval
-            if len(self.interceptors) < self.max_interceptors:
-                self._spawn_interceptor()
+            # Reset timer with slight randomness for variety
+            self.missile_timer = self.missile_interval + np.random.uniform(-0.2, 0.3)
+            
+            # Count only ALIVE interceptors
+            alive_interceptors = sum(1 for i in self.interceptors if i.alive)
+            
+            if alive_interceptors < self.max_interceptors:
+                # Check distance - don't fire at point-blank range
+                dist_to_agent = np.linalg.norm(
+                    self.agent.position - np.array(self.target.center)
+                )
+                too_close = dist_to_agent < 75  # ~2 seconds of flight time
+                
+                # Only spawn if target has line of sight to agent
+                # (Simulates "lock-on" - can't fire blind)
+                can_fire = not too_close
+                if can_fire and self.current_map_type != 'arena':
+                    can_fire = self.agent._has_line_of_sight(
+                        self.target.center, self.walls
+                    )
+                
+                if can_fire:
+                    self._spawn_interceptor()
         
         # --- UPDATE INTERCEPTORS ---
         hit_interceptor = False
@@ -228,8 +239,6 @@ class DroneEnv(gym.Env):
             if interceptor.alive and self.agent.rect.colliderect(interceptor.rect):
                 hit_interceptor = True
                 interceptor._die()
-        
-        t2 = time.perf_counter()
         
         # --- PATHFINDING ---
         if self.current_map_type != 'arena':
@@ -244,33 +253,8 @@ class DroneEnv(gym.Env):
                     self.agent.path.pop(0)
             if not self.agent.path: self._recalc_path()
         
-        t3 = time.perf_counter()
-        
         # --- OBSERVATION ---
         obs = self._get_obs()
-
-        t4 = time.perf_counter()
-
-        # --- UPDATE TIMERS ---
-        self.timers['physics'] += (t1 - t0)
-        self.timers['interceptors'] += (t2 - t1)
-        self.timers['pathing'] += (t3 - t2)
-        self.timers['observation'] += (t4 - t3)
-        self.timers['steps'] += 1
-
-        # PRINT REPORT EVERY 1000 STEPS
-        if self.timers['steps'] >= 1000:
-            total = self.timers['physics'] + self.timers['interceptors'] + self.timers['pathing'] + self.timers['observation']
-            if total > 0:
-                print(f"\n--- PERFORMANCE REPORT ({self.timers['steps']} steps) ---")
-                print(f"Physics:      {self.timers['physics']:.4f}s ({self.timers['physics']/total*100:.1f}%)")
-                print(f"Interceptors: {self.timers['interceptors']:.4f}s ({self.timers['interceptors']/total*100:.1f}%)")
-                print(f"Pathing:      {self.timers['pathing']:.4f}s ({self.timers['pathing']/total*100:.1f}%)")
-                print(f"Observation:  {self.timers['observation']:.4f}s ({self.timers['observation']/total*100:.1f}%)")
-                print(f"FPS Estimate: {self.timers['steps']/total:.0f}")
-                
-            # Reset
-            for k in self.timers: self.timers[k] = 0.0
         
         # --- REWARDS ---
         reward = 0
@@ -337,17 +321,22 @@ class DroneEnv(gym.Env):
         # --- TERMINAL STATES ---
         
         if hit_wall:
-            # INCREASED PENALTY: Math must favor safety over speed
             reward -= 50 
             self.cum_penalty_collision -= 50
             terminated = True
             self.termination_reason = "Crashed"
-        
+            # NEW: Trigger explosion visual
+            if self.render_mode == "human" and hasattr(self, 'explosion_manager'):
+                self.explosion_manager.add(self.agent.position[0], self.agent.position[1])
+
         elif hit_interceptor:
-            reward -= 50
-            self.cum_penalty_collision -= 50
+            reward -= 100
+            self.cum_penalty_collision -= 100
             terminated = True
             self.termination_reason = "Caught"
+            # NEW: Trigger explosion visual
+            if self.render_mode == "human" and hasattr(self, 'explosion_manager'):
+                self.explosion_manager.add(self.agent.position[0], self.agent.position[1])
         
         elif self.agent.rect.colliderect(self.target):
             reward += 100
@@ -602,6 +591,15 @@ class DroneEnv(gym.Env):
             self.screen = pygame.display.set_mode((self.SCREEN_WIDTH, self.SCREEN_HEIGHT))
             self.clock = pygame.time.Clock()
             pygame.display.set_caption("Drone Tactical Trainer")
+            
+            # Initialize visuals
+            try:
+                from visuals import Visuals, ExplosionManager
+                self.visuals = Visuals()
+                self.explosion_manager = ExplosionManager(self.visuals)
+                self.use_fancy_visuals = True
+            except ImportError:
+                self.use_fancy_visuals = False
         
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -609,29 +607,65 @@ class DroneEnv(gym.Env):
                 quit()
         
         # Background
-        self.screen.fill((240, 240, 240))
+        if self.use_fancy_visuals:
+            self.visuals.draw_background(self.screen, self.SCREEN_WIDTH, self.SCREEN_HEIGHT)
+        else:
+            self.screen.fill((240, 240, 240))
         
-        # Grid/walls
-        self.grid.draw(self.screen)
+        # Walls
+        if self.use_fancy_visuals:
+            for wall in self.walls:
+                self.visuals.draw_wall(self.screen, wall)
+        else:
+            self.grid.draw(self.screen)
         
-        # Target
-        pygame.draw.rect(self.screen, (0, 200, 0), self.target)
-        pygame.draw.rect(self.screen, (0, 150, 0), self.target, 3)
+        # Target / Base
+        if self.use_fancy_visuals:
+            self.visuals.draw_base(self.screen, self.target)
+        else:
+            pygame.draw.rect(self.screen, (0, 200, 0), self.target)
+            pygame.draw.rect(self.screen, (0, 150, 0), self.target, 3)
         
-        # Interceptors
+        # Interceptors / Missiles
         for interceptor in self.interceptors:
-            interceptor.draw(self.screen)
+            if self.use_fancy_visuals:
+                if interceptor.alive:
+                    self.visuals.draw_missile(self.screen, interceptor.position, 
+                                              interceptor.velocity, interceptor.size)
+                else:
+                    # Dead interceptor = add explosion (only once)
+                    if not hasattr(interceptor, '_exploded'):
+                        self.explosion_manager.add(interceptor.position[0], interceptor.position[1])
+                        interceptor._exploded = True
+            else:
+                interceptor.draw(self.screen)
         
-        # Agent
-        self.agent.draw_lidar(self.screen, self.walls)
-        self.agent.draw(self.screen)
+        # Update and draw explosions
+        if self.use_fancy_visuals:
+            self.explosion_manager.update(0.016)
+            self.explosion_manager.draw(self.screen)
+        
+        # Agent / Drone
+        if self.use_fancy_visuals:
+            self.visuals.draw_drone(self.screen, self.agent.position, 
+                                    self.agent.velocity, self.agent.size,
+                                    color=self.agent.color if hasattr(self.agent, 'color') else None)
+        else:
+            self.agent.draw_lidar(self.screen, self.walls)
+            self.agent.draw(self.screen)
         
         # HUD
         font = pygame.font.SysFont("Arial", 14)
         alive_interceptors = sum(1 for i in self.interceptors if i.alive)
         hud = f"Map: {self.current_map_type} | Threats: {alive_interceptors} | Step: {self.current_step}"
-        text = font.render(hud, True, (0, 0, 0))
-        self.screen.blit(text, (10, 10))
+        
+        # HUD background for readability
+        text = font.render(hud, True, (255, 255, 255))
+        text_bg = pygame.Surface((text.get_width() + 10, text.get_height() + 6))
+        text_bg.fill((0, 0, 0))
+        text_bg.set_alpha(150)
+        self.screen.blit(text_bg, (5, 5))
+        self.screen.blit(text, (10, 8))
         
         pygame.display.flip()
         self.clock.tick(60)

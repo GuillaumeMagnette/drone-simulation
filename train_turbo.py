@@ -40,14 +40,14 @@ os.environ["IN_MPI"] = "1"
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.env_util import make_vec_env
-from stable_baselines3.common.vec_env import SubprocVecEnv
+from stable_baselines3.common.vec_env import DummyVecEnv
 from drone_env import DroneEnv
 
 
 # ============================================
 # CURRICULUM - CHANGE THIS TO PROGRESS
 # ============================================
-CURRICULUM_STAGE = 0  # <-- Change this as you progress
+CURRICULUM_STAGE = 1  # <-- Change this as you progress
 
 STAGES = {
     # ===========================================
@@ -137,7 +137,7 @@ def make_env():
 
 if __name__ == "__main__":
     # Directories
-    models_dir = "models/PPO_Tactical3"
+    models_dir = "models/PPO_Tactical4"
     log_dir = "logs"
     os.makedirs(models_dir, exist_ok=True)
     os.makedirs(log_dir, exist_ok=True)
@@ -155,8 +155,8 @@ if __name__ == "__main__":
     print()
     
     # Parallel environments
-    NUM_CPU = 20
-    env = make_vec_env(make_env(), n_envs=NUM_CPU, vec_env_cls=SubprocVecEnv)
+    NUM_CPU = 8 
+    env = make_vec_env(make_env(), n_envs=NUM_CPU, vec_env_cls=DummyVecEnv)
     
     # --- HYPERPARAMETERS ---
     # Tuned for faster learning on navigation tasks

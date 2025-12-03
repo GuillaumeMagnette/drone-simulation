@@ -96,3 +96,16 @@ class Grid:
                     rect = pygame.Rect(node.x, node.y, self.grid_size, self.grid_size)
                     obstacles.append(rect)
         return obstacles
+    
+    def clear(self):
+        """Resets existing nodes to default state to avoid re-allocating memory."""
+        for row in self.grid:
+            for node in row:
+                node.is_obstacle = False
+                node.color = (255, 255, 255)
+                node.weight = 1.0 
+                # Reset A* vars
+                node.g_cost = float('inf')
+                node.h_cost = float('inf')
+                node.f_cost = float('inf')
+                node.parent = None

@@ -24,17 +24,17 @@ WHAT TO LOOK FOR:
 """
 
 from stable_baselines3 import PPO
-from drone_env import DroneEnv
+from drone_env_patched import DroneEnv
 import pygame
 import numpy as np
 
 
-MODEL_PATH = "models/PPO_Tactical3/drone_tactical"
+MODEL_PATH = "models/PPO_Tactical4/drone_tactical"
 
 SCENARIOS = {
     # Match curriculum stages
     1: {"name": "Nav Basics",     "map": "sparse", "interceptors": 0},
-    2: {"name": "Evasion Arena",  "map": "arena",  "interceptors": 1},
+    2: {"name": "Evasion Arena",  "map": "arena",  "interceptors": 2},
     3: {"name": "Terrain Evasion","map": "sparse", "interceptors": 1},
     4: {"name": "Multi-Threat",   "map": "sparse", "interceptors": 2},
     5: {"name": "Urban Nav",      "map": "urban",  "interceptors": 0},
