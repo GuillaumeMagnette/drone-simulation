@@ -29,7 +29,7 @@ from stable_baselines3.common.callbacks import BaseCallback
 # ============================================
 # CURRICULUM CONFIG
 # ============================================
-CURRICULUM_STAGE = 2  # <-- Change this as you progress
+CURRICULUM_STAGE = 1  # <-- Change this as you progress
 
 STAGES = {
     0: {"name": "Navigation Basics", "map_type": "sparse", "num_interceptors": 0},

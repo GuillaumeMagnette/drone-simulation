@@ -272,16 +272,71 @@ class DroneEnv(gym.Env):
         reward -= 0.1
         self.cum_reward_time -= 0.1
         
-        # 3. Interceptor proximity
+        # # 3. Interceptor proximity
+        # for interceptor in self.interceptors:
+        #     if not interceptor.alive: continue
+        #     if self.current_map_type != 'arena':
+        #         if not self.agent._has_line_of_sight(interceptor.position, self.walls):
+        #             continue
+        #     dist = np.linalg.norm(self.agent.position - interceptor.position)
+        #     if dist < 200.0:
+        #         intensity = 1.0 - (dist / 200.0)
+        #         reward -= intensity * 0.3
+
+
+        # 3. Predictive Trajectory Pain (The "Pre-Cognition" Update)
+        # We calculate danger based on where the agent WILL BE in 0.3 seconds.
+        # This forces the agent to counter-steer BEFORE entering the danger zone.
+        
+        prediction_time = 0.3
+        future_agent_pos = self.agent.position + (self.agent.velocity * prediction_time)
+        
         for interceptor in self.interceptors:
             if not interceptor.alive: continue
+            
+            # Line of Sight Check (Keep this!)
             if self.current_map_type != 'arena':
                 if not self.agent._has_line_of_sight(interceptor.position, self.walls):
                     continue
-            dist = np.linalg.norm(self.agent.position - interceptor.position)
-            if dist < 200.0:
-                intensity = 1.0 - (dist / 200.0)
-                reward -= intensity * 0.3
+            
+            # --- THE MAGIC CHANGE ---
+            # Calculate vector from Interceptor to Agent's FUTURE position
+            vec_to_future = future_agent_pos - interceptor.position
+            dist_raw = np.linalg.norm(vec_to_future)
+            
+            # Check if Interceptor is close
+            if dist_raw < 200.0:
+                # Project Future Agent onto Interceptor's velocity vector
+                # (Assuming interceptor continues straight for a split second)
+                
+                # Get interceptor direction
+                vel_mag = np.linalg.norm(interceptor.velocity)
+                if vel_mag > 0:
+                    int_dir = interceptor.velocity / vel_mag
+                else:
+                    continue # Stationary interceptor is just a proximity mine
+                
+                # Dot Product: How aligned is our future pos with their path?
+                forward_dist = np.dot(vec_to_future, int_dir)
+                
+                if forward_dist > 0:
+                    # Calculate Perpendicular Miss Distance
+                    sq_term = (dist_raw**2) - (forward_dist**2)
+                    miss_dist = np.sqrt(max(0, sq_term))
+                    
+                    # Safety Radius
+                    # 14px (Agent) + 16px (Interceptor) + Buffer = ~40px
+                    safety_radius = 40.0
+                    
+                    if miss_dist < safety_radius:
+                        # We are drifting into a collision course!
+                        intensity = 1.0 - (miss_dist / safety_radius)
+                        
+                        # Scale by how close the impact is
+                        proximity_multiplier = 1.0 - (dist_raw / 200.0)
+                        
+                        # Apply Penalty
+                        reward -= (intensity * proximity_multiplier) * 2.0
         
         # 4. Stall penalty
         speed = np.linalg.norm(self.agent.velocity)
@@ -330,8 +385,8 @@ class DroneEnv(gym.Env):
                 self.explosion_manager.add(self.agent.position[0], self.agent.position[1])
 
         elif hit_interceptor:
-            reward -= 100
-            self.cum_penalty_collision -= 100
+            reward -= 50
+            self.cum_penalty_collision -= 50
             terminated = True
             self.termination_reason = "Caught"
             # NEW: Trigger explosion visual
