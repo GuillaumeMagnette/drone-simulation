@@ -13,7 +13,7 @@ from stable_baselines3.common.callbacks import BaseCallback
 # ============================================
 # CURRICULUM CONFIG
 # ============================================
-CURRICULUM_STAGE = 2.0
+CURRICULUM_STAGE = 3.0
 
 STAGES = {
     # Phase 1: Basics
@@ -28,7 +28,7 @@ STAGES = {
     2.1: {"name": "Terrain Mission", "map": "sparse", "threats": 1, "bait": False, "respawn": True,  "dynamic": False},
     
     # Phase 3: Urban
-    3:   {"name": "Urban Scavenger", "map": "urban",  "threats": 2, "bait": False, "respawn": True,  "dynamic": True},
+    3:   {"name": "Urban Scavenger", "map": "urban",  "threats": 1, "bait": False, "respawn": True,  "dynamic": True},
     4:   {"name": "Urban Mission",   "map": "urban",  "threats": 2, "bait": False, "respawn": True,  "dynamic": False},
 }
 
@@ -36,7 +36,7 @@ STAGES = {
 # ============================================
 # PERFORMANCE CONFIG
 # ============================================
-NUM_ENVS = 12           # 24 Envs is usually stable for desktop CPUs
+NUM_ENVS = 24           # 24 Envs is usually stable for desktop CPUs
 USE_SUBPROC = True      
 
 class FPSCallback(BaseCallback):
@@ -76,7 +76,7 @@ def make_env(stage_config):
     return _init
 
 def main():
-    models_dir = "models/PPO_Tactical_Enhanced_Optimized"
+    models_dir = "models/PPO_Tactical_Enhanced_Optimized_v2"
     log_dir = "logs"
     os.makedirs(models_dir, exist_ok=True)
     os.makedirs(log_dir, exist_ok=True)
