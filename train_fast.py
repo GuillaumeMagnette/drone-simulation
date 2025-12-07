@@ -29,14 +29,15 @@ STAGES = {
     
     # Phase 3: Urban
     3:   {"name": "Urban Scavenger", "map": "urban",  "threats": 1, "bait": False, "respawn": True,  "dynamic": True},
-    4:   {"name": "Urban Mission",   "map": "urban",  "threats": 2, "bait": False, "respawn": True,  "dynamic": False},
+    # Goal: Learn to fly *behind* the blue drone when the red dot appears.
+    4.0: {"name": "Meat Shield", "map": "urban", "threats": 2, "bait": True, "respawn": True, "dynamic": True}
 }
 
 
 # ============================================
 # PERFORMANCE CONFIG
 # ============================================
-NUM_ENVS = 24           # 24 Envs is usually stable for desktop CPUs
+NUM_ENVS = 16           # 24 Envs is usually stable for desktop CPUs
 USE_SUBPROC = True      
 
 class FPSCallback(BaseCallback):

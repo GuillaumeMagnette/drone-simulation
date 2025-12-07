@@ -22,8 +22,8 @@ SCENARIOS = {
     4: {"name": "Terrain Mission", "map": "sparse", "threats": 1, "bait": False, "respawn": True,  "dynamic": False}, # <-- STAGE 2.1
     
     # Phase 3: Urban
-    5: {"name": "Urban Scavenger", "map": "urban",  "threats": 2, "bait": False, "respawn": True,  "dynamic": True},
-    6: {"name": "Urban Mission",   "map": "urban",  "threats": 2, "bait": False, "respawn": True,  "dynamic": False},
+    5: {"name": "Urban Scavenger", "map": "urban",  "threats": 1, "bait": False, "respawn": True,  "dynamic": True},
+    6: {"name": "Urban Mission",   "map": "urban",  "threats": 2, "bait": True, "respawn": True,  "dynamic": True},
 }
 
 def print_help():

@@ -33,29 +33,127 @@ from agent import Agent
 from interceptor import Interceptor
 from algorithm import a_star_algorithm
 
-# --- NEW: Simple Dummy Drone for Baiting ---
 class DummyDrone:
     def __init__(self, x, y):
         self.position = np.array([float(x), float(y)])
         self.velocity = np.array([0.0, 0.0])
+        self.acceleration = np.array([0.0, 0.0])
+        
         self.size = 14
         self.rect = pygame.Rect(x, y, 14, 14)
-        self.active = False
-        self.target_pos = None
-        self.speed = 100.0 # Slow and steady
-
-    def update(self, dt):
-        if not self.active or self.target_pos is None:
-            return
         
-        # Simple fly-to behavior
-        direction = self.target_pos - self.position
-        dist = np.linalg.norm(direction)
-        if dist > 5:
-            direction /= dist
-            self.velocity = direction * self.speed
-            self.position += self.velocity * dt
-            self.rect.center = self.position
+        self.active = False
+        self.respawn_timer = 0.0 # [NEW] Dead timer
+        self.color = (100, 100, 255) 
+        
+        # PHYSICS TUNING
+        self.max_speed = 500.0   # Significantly faster than Agent (360) to catch up
+        self.max_force = 4000.0  # Snappy acceleration
+        self.desired_separation = 45.0
+
+    def update(self, dt, walls, leader_pos, leader_vel, other_drones):
+        # [NEW] Respawn Logic
+        if not self.active:
+            if self.respawn_timer > 0:
+                self.respawn_timer -= dt
+                if self.respawn_timer <= 0:
+                    # Respawn behind leader
+                    self.active = True
+                    offset = np.array([-30.0, 30.0]) if np.random.random() > 0.5 else np.array([-30.0, -30.0])
+                    self.position = leader_pos + offset
+            return
+
+        self.acceleration[:] = 0
+        
+        # [NEW] Teleport Leash (Anti-Stuck)
+        to_leader = leader_pos - self.position
+        dist_leader = np.linalg.norm(to_leader)
+        
+        if dist_leader > 250.0:
+            # We are stuck or lost. Teleport closer.
+            self.position = leader_pos - (leader_vel * 0.1) # Teleport behind
+            self.velocity[:] = 0
+            return # Skip physics this frame
+
+        # --- 1. SEPARATION ---
+        sep_force = np.array([0.0, 0.0])
+        count = 0
+        
+        for other in other_drones:
+            if other is self or not other.active: continue
+            d = np.linalg.norm(self.position - other.position)
+            if 0 < d < self.desired_separation:
+                diff = self.position - other.position
+                diff /= d
+                sep_force += diff
+                count += 1
+        
+        if count > 0:
+            sep_force = (sep_force / count) * self.max_speed * 2.0
+
+        # --- 2. COHESION (Slot Following) ---
+        target_pos = leader_pos
+        leader_speed = np.linalg.norm(leader_vel)
+        
+        # Dynamic Slot: If leader moving, fly to wingman position
+        if leader_speed > 10:
+            leader_dir = leader_vel / leader_speed
+            # Aim for a spot 40px behind and slightly to side?
+            # Actually, just aiming 30px behind is stable enough
+            target_pos = leader_pos - (leader_dir * 30.0)
+            
+        arrive = target_pos - self.position
+        dist_arrive = np.linalg.norm(arrive)
+        seek_force = np.array([0.0, 0.0])
+        
+        if dist_arrive > 0:
+            desired_vel = (arrive / dist_arrive) * self.max_speed
+            seek_force = desired_vel - self.velocity
+
+        # --- 3. APPLY FORCES ---
+        total_force = (sep_force * 3.0) + (seek_force * 1.5)
+        
+        # Clamp Force
+        if np.linalg.norm(total_force) > self.max_force:
+            total_force = (total_force / np.linalg.norm(total_force)) * self.max_force
+
+        self.acceleration += total_force
+        self.velocity += self.acceleration * dt
+        self.velocity *= 0.90 # High Drag for stability
+
+        # --- 4. PHYSICS (Improved Wall Slide) ---
+        # Move X
+        self.position[0] += self.velocity[0] * dt
+        self.rect.centerx = int(self.position[0])
+        
+        # Wall Check X
+        block_hit = self.rect.collidelist(walls)
+        if block_hit != -1:
+            # If hit, push out
+            self.position[0] -= self.velocity[0] * dt
+            self.velocity[0] *= -0.5
+            self.rect.centerx = int(self.position[0])
+            
+        # Move Y
+        self.position[1] += self.velocity[1] * dt
+        self.rect.centery = int(self.position[1])
+        
+        # Wall Check Y
+        block_hit = self.rect.collidelist(walls)
+        if block_hit != -1:
+            self.position[1] -= self.velocity[1] * dt
+            self.velocity[1] *= -0.5
+            self.rect.centery = int(self.position[1])
+            
+        # Bounds
+        self.position = np.clip(self.position, 10, 790)
+        self.rect.center = self.position
+
+    def die(self):
+        self.active = False
+        self.respawn_timer = 5.0 # Gone for 5 seconds
+        self.position = np.array([-1000.0, -1000.0])
+        self.rect.center = self.position
 
 class DroneEnv(gym.Env):
     metadata = {'render_modes': ['human']}
@@ -72,7 +170,9 @@ class DroneEnv(gym.Env):
         
         # --- AGENT ---
         self.agent = Agent(200, 200, size=14)
-        self.dummy = DummyDrone(0, 0) # Initialize inactive dummy
+        # --- SWARM (Replaces self.dummy) ---
+        self.swarm_size = 2
+        self.swarm = [DummyDrone(0,0) for _ in range(self.swarm_size)]
         
         # --- SPACES ---
         self.action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
@@ -255,15 +355,18 @@ class DroneEnv(gym.Env):
         if self.dynamic_target:
             self._relocate_target()
         
-        # Bait/Dummy Setup
         if self.use_bait:
-            self.dummy.active = True
-            self.dummy.position = self.agent.position + np.array([40.0, 0.0])
-            self.dummy.target_pos = np.array(self.target.center)
-            self.dummy.rect.center = self.dummy.position
+            for i, drone in enumerate(self.swarm):
+                drone.active = True
+                # Spawn in a small circle around agent
+                angle = (2 * np.pi / self.swarm_size) * i
+                offset = np.array([np.cos(angle), np.sin(angle)]) * 30
+                drone.position = self.agent.position + offset
+                drone.rect.center = drone.position
         else:
-            self.dummy.active = False
-            self.dummy.position = np.array([-100.0, -100.0])
+            for drone in self.swarm:
+                drone.active = False
+                drone.position = np.array([-100.0, -100.0])
         
         # Agent Init
         self.agent.velocity[:] = 0
@@ -422,8 +525,10 @@ class DroneEnv(gym.Env):
         
         # Neighbors (Dummy/Bait)
         visible_neighbors = []
-        if self.dummy.active:
-            visible_neighbors.append(self.dummy)
+        if self.use_bait:
+            # Add all active swarm members
+            visible_neighbors = [d for d in self.swarm if d.active]
+            
         neighbor_sectors = self.agent.get_sector_readings(visible_neighbors, radius=300.0, num_sectors=8)
         
         # --- 6. ASSEMBLE (Total: 40) ---
@@ -481,11 +586,17 @@ class DroneEnv(gym.Env):
                 proposed_force = opp_dir * self.agent.max_force * 1.5 # 150% Power braking
                 
         # --- 1. PHYSICS ---
-        # Apply the (possibly overridden) force
-        self.agent.apply_force(proposed_force)
+        force = action * self.agent.max_force
+        self.agent.apply_force(proposed_force) # (Using the proposed_force from Safety Shield)
         self.agent.update_physics(0.016)
         self.agent.rect.center = self.agent.position
-        if self.dummy.active: self.dummy.update(0.016)
+        
+        # [NEW] Update Swarm Physics
+        if self.use_bait:
+            for drone in self.swarm:
+                if drone.active:
+                    # Pass the whole list so they can separate from each other
+                    drone.update(0.016, self.walls, self.agent, self.swarm)
         
         # --- 2. WALL COLLISION ---
         hit_wall = False
@@ -516,23 +627,52 @@ class DroneEnv(gym.Env):
                     self._spawn_interceptor()
                     self.total_missiles_spawned += 1
 
-        # --- 4. ENTITY UPDATES ---
+        # --- 4. ENTITY UPDATES & BAIT REWARD ---
         hit_interceptor = False
+        # Create target list: Agent + All Active Drones
         potential_targets = [self.agent]
-        if self.dummy.active: potential_targets.append(self.dummy)
+        if self.use_bait:
+            potential_targets.extend([d for d in self.swarm if d.active])
+        
+        # [NEW] Track bait success
+        bait_successful = False 
         
         for interceptor in self.interceptors:
             if not interceptor.alive: continue
+            
+            dist_to_agent = np.linalg.norm(interceptor.position - self.agent.position)
             interceptor.update(0.016, potential_targets, self.walls)
             
+            # 1. Check Agent Hit
             if interceptor.alive and self.agent.rect.colliderect(interceptor.rect):
                 hit_interceptor = True
                 interceptor._die()
             
-            if self.dummy.active and interceptor.alive and self.dummy.rect.colliderect(interceptor.rect):
-                interceptor._die()
-                if self.render_mode == "human" and hasattr(self, 'explosion_manager'):
-                    self.explosion_manager.add(self.dummy.position[0], self.dummy.position[1])
+            # 2. Check Swarm Hits
+            if self.use_bait and interceptor.alive:
+                # Check collision with ANY drone in the swarm
+                # We use collidelist for speed
+                swarm_rects = [d.rect for d in self.swarm if d.active]
+                hit_index = interceptor.rect.collidelist(swarm_rects)
+                
+                if hit_index != -1:
+                    # We hit a drone!
+                    interceptor._die()
+
+                    
+                    # Visual explosion
+                    hit_drone = [d for d in self.swarm if d.active][hit_index]
+
+                    # [ADD THIS LINE HERE] -----------------------------
+                    hit_drone.die() # 2. Kill Drone (Starts 5s timer)
+                    # -------------------------------------------------
+                    
+                    if self.render_mode == "human" and hasattr(self, 'explosion_manager'):
+                        self.explosion_manager.add(hit_drone.position[0], hit_drone.position[1])
+                    
+                    # Reward check
+                    if dist_to_agent < 200:
+                        bait_successful = True
 
         # --- 5. PATHFINDING ---
         if self.current_map_type != 'arena':
@@ -568,6 +708,12 @@ class DroneEnv(gym.Env):
         if shield_activated:
             # -1.0 is enough to say "Bad Pilot", but not -50 "Dead Pilot"
             reward -= 1.0
+
+        # [NEW] THE BETRAYAL BONUS
+        if bait_successful:
+            reward += 30.0
+            # Optional: Log it so we know it happened
+            # self.termination_reason = "Bait Success"
 
         # Threat Analysis
         closest_threat_dist = 9999.0
@@ -951,17 +1097,16 @@ class DroneEnv(gym.Env):
             self.agent.draw_lidar(self.screen, self.walls)
             self.agent.draw(self.screen)
 
-        # --- DUMMY DRONE RENDERING (Injected) ---
-        if self.dummy.active:
-            if self.use_fancy_visuals:
-                # Use same drone sprite but with Blue color
-                self.visuals.draw_drone(self.screen, self.dummy.position,
-                                        self.dummy.velocity, self.dummy.size,
-                                        color=self.dummy.color)
-            else:
-                pygame.draw.circle(self.screen, self.dummy.color, 
-                                   self.dummy.rect.center, 7)
-        # ----------------------------------------
+        # Draw Swarm
+        if self.use_bait:
+            for drone in self.swarm:
+                if not drone.active: continue
+                if self.use_fancy_visuals:
+                    self.visuals.draw_drone(self.screen, drone.position,
+                                            drone.velocity, drone.size,
+                                            color=drone.color)
+                else:
+                    pygame.draw.circle(self.screen, drone.color, drone.rect.center, 7)
         
         # HUD
         font = pygame.font.SysFont("Arial", 14)
