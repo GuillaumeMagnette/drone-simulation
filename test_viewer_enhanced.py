@@ -9,13 +9,13 @@ import pygame
 import numpy as np
 import time
 
-MODEL_PATH = "models/PPO_Tactical_Enhanced_with_survival/drone_tactical"
+MODEL_PATH = "models/PPO_Tactical_Enhanced_Optimized/drone_tactical"
 
 # ALIGNED WITH TRAIN_FAST.PY
 SCENARIOS = {
     # Phase 1: Basics
     1: {"name": "Nav Basics",      "map": "sparse", "threats": 0, "bait": False, "respawn": False, "dynamic": False},
-    2: {"name": "Evasion Arena",   "map": "arena",  "threats": 2, "bait": False, "respawn": True,  "dynamic": True},
+    2: {"name": "Evasion Arena",   "map": "arena",  "threats": 1, "bait": False, "respawn": True,  "dynamic": True},
     
     # Phase 2: Scavenger Hunt
     3: {"name": "Scavenger Hunt",  "map": "sparse", "threats": 1, "bait": False, "respawn": True,  "dynamic": True}, # <-- STAGE 2.0

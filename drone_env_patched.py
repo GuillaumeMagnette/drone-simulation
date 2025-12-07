@@ -77,7 +77,10 @@ class DroneEnv(gym.Env):
         # --- SPACES ---
         self.action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
         # 36 inputs: Lidar(8), Vel(2), GPS(2), Threats(8), Proj(8), Neighbors(8)
-        self.observation_space = spaces.Box(low=-1, high=1, shape=(36,), dtype=np.float32)
+        # CHANGE: Increase shape from 36 to 40
+        # [0-35] Existing sensors
+        # [36-39] Precision Tracking (Nearest Missile)
+        self.observation_space = spaces.Box(low=-1, high=1, shape=(40,), dtype=np.float32)
         
         # --- WORLD ---
         self.ROWS = self.SCREEN_WIDTH // 10
@@ -112,28 +115,66 @@ class DroneEnv(gym.Env):
                 f.write("Episode,Map,Interceptors,DistRew,TimeRew,CollPen,WinRew,Total,Reason\n")
 
     def _spawn_hazard(self):
-        """Spawns the static Missile Battery (SAM Site)."""
-        # 1. Arena Mode: Center
+        """
+        Tactical Spawning: Places the SAM site between Agent and Target.
+        Simulates an 'Area Denial' weapon covering the approach.
+        """
         if self.current_map_type == 'arena':
             self.hazard_source = (self.SCREEN_WIDTH // 2, self.SCREEN_HEIGHT // 2)
             return
 
-        # 2. Terrain/Urban Mode: Random valid location
-        for _ in range(100):
-            x = np.random.randint(50, self.SCREEN_WIDTH - 50)
-            y = np.random.randint(50, self.SCREEN_HEIGHT - 50)
-            test_rect = pygame.Rect(x - 20, y - 20, 40, 40)
-            
-            # Check A: Not inside a wall
-            if test_rect.collidelist(self.walls) != -1: continue
-            
-            # Check B: Not too close to Agent
-            dist_to_agent = np.linalg.norm(np.array([x, y]) - self.agent.position)
-            if dist_to_agent > 300:
-                self.hazard_source = (x, y)
-                return
+        # Vector from Agent -> Target
+        start = self.agent.position
+        end = np.array(self.target.center)
+        vec = end - start
+        dist = np.linalg.norm(vec)
         
-        self.hazard_source = (self.SCREEN_WIDTH // 2, self.SCREEN_HEIGHT // 2)
+        # If target is too close, just spawn random
+        if dist < 300:
+            self.hazard_source = (self.SCREEN_WIDTH // 2, self.SCREEN_HEIGHT // 2)
+            return
+
+        # Target Point: Somewhere in the middle 50% of the path
+        # This puts the SAM "In the way"
+        t = np.random.uniform(0.3, 0.7)
+        midpoint = start + vec * t
+        
+        # Add noise so it's not perfectly on the line (Ambush position)
+        noise_x = np.random.randint(-150, 150)
+        noise_y = np.random.randint(-150, 150)
+        
+        spawn_x = int(midpoint[0] + noise_x)
+        spawn_y = int(midpoint[1] + noise_y)
+        
+        # Clamp to screen
+        spawn_x = max(50, min(self.SCREEN_WIDTH - 50, spawn_x))
+        spawn_y = max(50, min(self.SCREEN_HEIGHT - 50, spawn_y))
+        
+        # Ensure it's not inside a wall
+        test_rect = pygame.Rect(spawn_x - 20, spawn_y - 20, 40, 40)
+        
+        # If the calculated "Tactical Spot" is inside a wall, 
+        # Spiral out until we find an open spot
+        found = False
+        for radius in range(10, 200, 20): # Search expanding circle
+            if found: break
+            for angle in np.linspace(0, 6.28, 8):
+                cx = spawn_x + np.cos(angle) * radius
+                cy = spawn_y + np.sin(angle) * radius
+                
+                # Check bounds
+                if not (50 < cx < self.SCREEN_WIDTH-50 and 50 < cy < self.SCREEN_HEIGHT-50):
+                    continue
+                    
+                check_rect = pygame.Rect(cx-20, cy-20, 40, 40)
+                if check_rect.collidelist(self.walls) == -1:
+                    self.hazard_source = (cx, cy)
+                    found = True
+                    break
+        
+        if not found:
+            # Fallback to random if the tactical calculation failed
+            self.hazard_source = (np.random.randint(100, 700), np.random.randint(100, 700))
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
@@ -183,7 +224,11 @@ class DroneEnv(gym.Env):
         self.grid.clear() 
         if map_type == 'arena': self._generate_arena()
         elif map_type == 'sparse': self._generate_sparse()
-        else: self._generate_urban()
+        else: 
+            # URBAN OPTIMIZATION
+            self._generate_urban()
+            # Use the optimized big rectangles for physics!
+            self.walls = self.urban_walls 
 
         self.grid.apply_costmap()
         self.walls = self.grid.get_obstacle_rects()
@@ -234,61 +279,134 @@ class DroneEnv(gym.Env):
         return self._get_obs(), {}
     
     def _relocate_target(self):
-        """Moves the target to a new random location away from the agent."""
-
-        # Try to find a spot far from the agent (forces movement)
-        for _ in range(20):
-            x = np.random.randint(50, self.SCREEN_WIDTH - 50)
-            y = np.random.randint(50, self.SCREEN_HEIGHT - 50)
+        """
+        Moves the target to a new random location.
+        Robust version for Dense Urban Maps.
+        """
+        found = False
+        attempts = 0
+        
+        # Try up to 500 times to find a valid spot
+        # (Urban maps have ~40% walkable area, so this will find one quickly)
+        while attempts < 500:
+            attempts += 1
             
-            candidate_rect = pygame.Rect(x, y, 40, 40)
-            # Check walls
-            if candidate_rect.collidelist(self.walls) != -1: continue
+            # Margin of 20px from screen edges
+            x = np.random.randint(20, self.SCREEN_WIDTH - 20)
+            y = np.random.randint(20, self.SCREEN_HEIGHT - 20)
             
+            # Create a test rect
+            # We inflate it slightly to ensure it's not touching a wall pixel-perfectly
+            candidate_rect = pygame.Rect(x, y, 40, 40).inflate(10, 10)
+            
+            # 1. Check Wall Collision
+            if candidate_rect.collidelist(self.walls) != -1: 
+                continue
+            
+            # 2. Check Distance (Force agent to travel)
+            # In Scavenger mode, we want the agent to move at least 200px
             dist = np.linalg.norm(np.array([x,y]) - self.agent.position)
+            if dist < 200:
+                continue
             
-            # We want a target that is at least 300px away
-            if dist > 300:
-                self.target.topleft = (x, y)
-                return
+            # If we get here, it's valid
+            self.target.topleft = (x, y)
+            found = True
+            break
                 
-        # Fallback if hard check fails
-        x = np.random.randint(50, self.SCREEN_WIDTH - 50)
-        y = np.random.randint(50, self.SCREEN_HEIGHT - 50)
-        self.target.topleft = (x, y)
+        # Emergency Fallback (Center Plaza) if 500 tries fail
+        if not found:
+            self.target.center = (self.SCREEN_WIDTH // 2, self.SCREEN_HEIGHT // 2)
 
     def _get_obs(self):
-        # 1. Lidar (8)
+        """
+        Generates the 40-dimensional observation vector.
+        [0-7]   Lidar (Walls)
+        [8-9]   Velocity (Agent)
+        [10-11] GPS (Vector to Target)
+        [12-19] Threat Sectors (General Awareness)
+        [20-27] Projectile Sectors (Reserved)
+        [28-35] Neighbor Sectors (Dummy/Ally)
+        [36-39] Precision Tracking (Most Dangerous Missile)
+        """
+        
+        # --- 1. LIDAR (8) ---
         lidar = self.agent.cast_rays(self.walls, num_rays=8, max_dist=200)
         
-        # 2. Velocity (2)
+        # --- 2. VELOCITY (2) ---
         vel = self.agent.velocity / self.agent.max_speed
         
-        # 3. GPS (2) - ALWAYS ACTIVE NOW
-        # In Scavenger Hunt, we need to see the vector to the new target.
+        # --- 3. GPS (2) ---
+        # Always active for Scavenger Hunt / Mission modes
         if self.current_map_type == 'arena':
-            # Optimization: Direct vector in empty space
+            # Optimization: Direct line in empty space
             waypoint = np.array(self.target.center, dtype=float)
-            vec_to_wp = waypoint - self.agent.position
-            dist_to_wp = np.linalg.norm(vec_to_wp)
-            if dist_to_wp > 0: vec_to_wp /= dist_to_wp
-            
         elif self.agent.path:
-            # Follow A* nodes in complex maps
+            # Navigation: Follow A* nodes
             node = self.agent.path[0]
             waypoint = np.array([node.x + 7, node.y + 7])
-            vec_to_wp = waypoint - self.agent.position
-            dist_to_wp = np.linalg.norm(vec_to_wp)
-            if dist_to_wp > 0: vec_to_wp /= dist_to_wp
-            
         else:
-            # Fallback if path failing (direct vector)
+            # Fallback: Direct line
             waypoint = np.array(self.target.center, dtype=float)
-            vec_to_wp = waypoint - self.agent.position
-            dist_to_wp = np.linalg.norm(vec_to_wp)
-            if dist_to_wp > 0: vec_to_wp /= dist_to_wp
         
-        # 4. Threats (8)
+        vec_to_wp = waypoint - self.agent.position
+        dist_to_wp = np.linalg.norm(vec_to_wp)
+        if dist_to_wp > 0: vec_to_wp /= dist_to_wp
+        
+        # --- 4. PRECISION TRACKING (4) - THE RWR UPGRADE ---
+        # Select the single most dangerous missile based on Closing Speed & Distance
+        most_dangerous_missile = None
+        highest_danger_score = -float('inf')
+        
+        for i in self.interceptors:
+            if not i.alive: continue
+            
+            # Vector pointing FROM Agent TO Missile
+            vec_to_missile = i.position - self.agent.position
+            dist = np.linalg.norm(vec_to_missile) + 0.1 # Safety epsilon
+            
+            # Relative Velocity (Missile Vel - Agent Vel)
+            rel_vel = i.velocity - self.agent.velocity
+            
+            # Calculate Closing Speed via Dot Product
+            # Direction from Agent to Missile
+            dir_to_missile = vec_to_missile / dist
+            
+            # If Missile is flying AT Agent, dot(rel_vel, dir_to_missile) is NEGATIVE.
+            # We want positive closing speed, so we negate the dot product.
+            closing_speed = -np.dot(rel_vel, dir_to_missile)
+            
+            # SCORING HEURISTIC (Time-To-Impact)
+            if closing_speed > 0:
+                # It is closing in. High speed + Low Dist = MAX DANGER.
+                score = closing_speed / dist
+            else:
+                # It is flying away. Low score.
+                # We subtract distance so far-away missiles score lower than close ones.
+                score = -dist 
+            
+            if score > highest_danger_score:
+                highest_danger_score = score
+                most_dangerous_missile = i
+        
+        # Construct the 4-float vector
+        missile_state = np.zeros(4, dtype=np.float32)
+        
+        if most_dangerous_missile:
+            # 1. Relative Position (Normalized by Radar Range 400)
+            rel_pos = (most_dangerous_missile.position - self.agent.position) / 400.0
+            
+            # 2. Relative Velocity (Normalized by Max Missile Speed 600)
+            # Crucial for the agent to know if it needs to lead the dodge
+            rel_vel_norm = (most_dangerous_missile.velocity - self.agent.velocity) / 600.0
+            
+            missile_state[0] = np.clip(rel_pos[0], -1, 1)
+            missile_state[1] = np.clip(rel_pos[1], -1, 1)
+            missile_state[2] = np.clip(rel_vel_norm[0], -1, 1)
+            missile_state[3] = np.clip(rel_vel_norm[1], -1, 1)
+
+        # --- 5. SECTOR SENSORS (24) ---
+        # General awareness of threats, projectiles, and neighbors
         visible_threats = []
         for interceptor in self.interceptors:
             if not interceptor.alive: continue
@@ -296,19 +414,27 @@ class DroneEnv(gym.Env):
                 visible_threats.append(interceptor)
             elif self.agent._has_line_of_sight(interceptor.position, self.walls):
                 visible_threats.append(interceptor)
+        
         threat_sectors = self.agent.get_sector_readings(visible_threats, radius=400.0, num_sectors=8)
         
-        # 5. Projectiles (8)
+        # Projectiles (Placeholder/Reserved)
         projectile_sectors = np.ones(8, dtype=np.float32)
         
-        # 6. Neighbors (8)
+        # Neighbors (Dummy/Bait)
         visible_neighbors = []
         if self.dummy.active:
             visible_neighbors.append(self.dummy)
         neighbor_sectors = self.agent.get_sector_readings(visible_neighbors, radius=300.0, num_sectors=8)
         
+        # --- 6. ASSEMBLE (Total: 40) ---
         return np.concatenate([
-            lidar, vel, vec_to_wp, threat_sectors, projectile_sectors, neighbor_sectors
+            lidar,              # 0-7
+            vel,                # 8-9
+            vec_to_wp,          # 10-11
+            threat_sectors,     # 12-19
+            projectile_sectors, # 20-27
+            neighbor_sectors,   # 28-35
+            missile_state       # 36-39 (PRECISION TRACKING)
         ]).astype(np.float32)
     
 
@@ -316,23 +442,58 @@ class DroneEnv(gym.Env):
         self.current_step += 1
         self.repath_steps += 1
         
+        # --- 0. SAFETY SHIELD (Envelope Protection) ---
+        # "Industry Standard" Override
+        # Calculate where the requested action sends us
+        proposed_force = action * self.agent.max_force
+        
+        # Predict position in next frame (0.016s)
+        # We look a bit further ahead (e.g. 3 frames) for safety buffer
+        lookahead = 0.05 
+        pred_vel = self.agent.velocity + (proposed_force / self.agent.mass) * lookahead
+        pred_pos = self.agent.position + pred_vel * lookahead
+        pred_rect = self.agent.rect.copy()
+        pred_rect.center = pred_pos
+        
+        # Check collision of PREDICTED state
+        shield_activated = False
+        
+        # Check Wall Collision
+        hit_future_wall = False
+        if (pred_rect.left < 0 or pred_rect.right > self.SCREEN_WIDTH or
+            pred_rect.top < 0 or pred_rect.bottom > self.SCREEN_HEIGHT):
+            hit_future_wall = True
+        elif pred_rect.collidelist(self.walls) != -1:
+            hit_future_wall = True
+            
+        if hit_future_wall:
+            shield_activated = True
+            
+            # EMERGENCY BRAKE / REFLECTION
+            # 1. Kill current velocity (Brake)
+            # We apply a force opposite to velocity to stop movement
+            # But simpler: we just override the force to push AWAY from the wall
+            # Since we don't have normal vectors easily, we just apply 
+            # MAX FORCE opposite to current velocity (Emergency Stop)
+            if np.linalg.norm(self.agent.velocity) > 0.1:
+                opp_dir = -self.agent.velocity / np.linalg.norm(self.agent.velocity)
+                # Overwrite the action!
+                proposed_force = opp_dir * self.agent.max_force * 1.5 # 150% Power braking
+                
         # --- 1. PHYSICS ---
-        force = action * self.agent.max_force
-        self.agent.apply_force(force)
+        # Apply the (possibly overridden) force
+        self.agent.apply_force(proposed_force)
         self.agent.update_physics(0.016)
         self.agent.rect.center = self.agent.position
         if self.dummy.active: self.dummy.update(0.016)
         
+        # --- 2. WALL COLLISION ---
         hit_wall = False
         if (self.agent.rect.left < 0 or self.agent.rect.right > self.SCREEN_WIDTH or
             self.agent.rect.top < 0 or self.agent.rect.bottom > self.SCREEN_HEIGHT): hit_wall = True   
         if not hit_wall and self.agent.rect.collidelist(self.walls) != -1: hit_wall = True
 
-        # Update Dummy Target if dynamic
-        if self.dummy.active and self.dynamic_target:
-             self.dummy.target_pos = np.array(self.target.center)
-
-        # --- 2. MISSILE SPAWNING (Standard) ---
+        # --- 3. MISSILE SPAWNING (Using Hazard Source) ---
         self.missile_timer -= 0.016
         if self.missile_timer <= 0:
             self.missile_timer = self.missile_interval + np.random.uniform(-0.2, 0.3)
@@ -342,34 +503,38 @@ class DroneEnv(gym.Env):
                 if alive_interceptors < self.max_interceptors: should_spawn = True
             else:
                 if self.total_missiles_spawned < self.max_interceptors: should_spawn = True
+            
             if should_spawn:
-                # [CHANGE THIS] Check distance to HAZARD SOURCE
+                # [FIX]: Check distance to HAZARD SOURCE, not target
                 dist_to_hazard = np.linalg.norm(self.agent.position - np.array(self.hazard_source))
                 too_close = dist_to_hazard < 75
                 can_fire = not too_close
                 if can_fire and self.current_map_type != 'arena':
-                    # [CHANGE THIS] Check LOS from HAZARD SOURCE
                     can_fire = self.agent._has_line_of_sight(self.hazard_source, self.walls)
+                
                 if can_fire:
                     self._spawn_interceptor()
                     self.total_missiles_spawned += 1
 
-        # --- 3. ENTITY UPDATES ---
+        # --- 4. ENTITY UPDATES ---
         hit_interceptor = False
         potential_targets = [self.agent]
         if self.dummy.active: potential_targets.append(self.dummy)
+        
         for interceptor in self.interceptors:
             if not interceptor.alive: continue
             interceptor.update(0.016, potential_targets, self.walls)
+            
             if interceptor.alive and self.agent.rect.colliderect(interceptor.rect):
                 hit_interceptor = True
                 interceptor._die()
+            
             if self.dummy.active and interceptor.alive and self.dummy.rect.colliderect(interceptor.rect):
                 interceptor._die()
                 if self.render_mode == "human" and hasattr(self, 'explosion_manager'):
                     self.explosion_manager.add(self.dummy.position[0], self.dummy.position[1])
 
-        # --- 4. PATHFINDING ---
+        # --- 5. PATHFINDING ---
         if self.current_map_type != 'arena':
             if self.repath_steps >= self.repath_interval:
                 self.repath_steps = 0
@@ -381,7 +546,7 @@ class DroneEnv(gym.Env):
             if not self.agent.path: self._recalc_path()
 
         # ============================================================
-        # 5. THE DEFCON SYSTEM (Dynamic Context-Aware Rewards)
+        # 6. REWARDS & DEFCON SYSTEM
         # ============================================================
         
         obs = self._get_obs()
@@ -389,57 +554,79 @@ class DroneEnv(gym.Env):
         terminated = False
         truncated = False
         
-        # 1. Distance Reward (Standard)
+        # Base Rewards
         cur_dist = np.linalg.norm(np.array(self.target.center) - self.agent.position)
         progress = self.last_dist - cur_dist
         self.last_dist = cur_dist
         reward += progress * 0.15
         self.cum_reward_dist += progress * 0.15
         
-        # 2. Time Penalty (Always apply, discourages camping)
         reward -= 0.1 
         self.cum_reward_time -= 0.1
 
-        # 3. Detect Threat Level
-        # Check if any live missile is within close range (Combat Range)
+        # Penalty for relying on the Safety Shield
+        if shield_activated:
+            # -1.0 is enough to say "Bad Pilot", but not -50 "Dead Pilot"
+            reward -= 1.0
+
+        # Threat Analysis
         closest_threat_dist = 9999.0
         prediction_time = 0.3
         future_agent_pos = self.agent.position + (self.agent.velocity * prediction_time)
-        
         threat_detected = False
-
+        
         for interceptor in self.interceptors:
             if not interceptor.alive: continue
             dist = np.linalg.norm(self.agent.position - interceptor.position)
             closest_threat_dist = min(closest_threat_dist, dist)
-            if dist < 350.0: # Detection Radius
+            
+            # Defcon Trigger (350px)
+            if dist < 350.0:
                 if self.current_map_type == 'arena' or self.agent._has_line_of_sight(interceptor.position, self.walls):
                     threat_detected = True
-
-        # Trajectory Pain (The "Dodge" Signal)
+            
+            # --- TRAJECTORY PAIN (The Dodge Signal) ---
             vec_to_future = future_agent_pos - interceptor.position
             dist_raw = np.linalg.norm(vec_to_future)
+            
             if dist_raw < 200.0:
                 vel_mag = np.linalg.norm(interceptor.velocity)
                 if vel_mag > 0:
                     int_dir = interceptor.velocity / vel_mag
                     forward_dist = np.dot(vec_to_future, int_dir)
+                    
                     if forward_dist > 0:
                         sq_term = (dist_raw**2) - (forward_dist**2)
                         miss_dist = np.sqrt(max(0, sq_term))
                         safety_radius = 40.0
+                        
                         if miss_dist < safety_radius:
                             intensity = 1.0 - (miss_dist / safety_radius)
-                            reward -= intensity * 2.0 
+                            # [CHANGED] Boosted Penalty: Make the Kill Tube feel like Lava
+                            reward -= intensity * 3.0 
 
-        # 4. Penalties (Relaxed when threatened)
-        # We can remove the "Arena Ring of Fire" hack now, 
-        # because the Dynamic Target forces them to leave the edges!
-        
+                # --- NEW: TOP GUN BONUS (Evasion Geometry) ---
+                # Reward moving perpendicular to the missile
+                to_missile = interceptor.position - self.agent.position
+                norm_to_m = np.linalg.norm(to_missile)
+                if norm_to_m > 0:
+                    to_missile /= norm_to_m
+                    
+                    my_speed = np.linalg.norm(self.agent.velocity)
+                    if my_speed > 10:
+                        my_dir = self.agent.velocity / my_speed
+                        # Dot Product: 1.0 = Head on, 0.0 = Sidestep
+                        alignment = np.dot(to_missile, my_dir)
+                        
+                        # If we are moving sideways or away (< 0.3 alignment)
+                        if alignment < 0.3:
+                            reward += 0.05
+
+        # Penalties (Context Aware)
         is_safe = not threat_detected
+        speed = np.linalg.norm(self.agent.velocity)
         
         # Stall Penalty (Only if safe)
-        speed = np.linalg.norm(self.agent.velocity)
         if is_safe and speed < 5 and cur_dist > 50.0:
              reward -= 0.5 if self.current_map_type == 'arena' else 1.0
 
@@ -447,7 +634,7 @@ class DroneEnv(gym.Env):
         if is_safe and np.min(obs[0:8]) < 0.15: 
             reward -= 0.2
         
-        # Predictive Crash (Don't hit walls at high speed)
+        # Crash Prediction (Reduced if threatened)
         lookahead_vec = self.agent.velocity * 0.2 
         future_pos = self.agent.position + lookahead_vec
         future_rect = self.agent.rect.copy()
@@ -459,11 +646,10 @@ class DroneEnv(gym.Env):
         
         if future_hit:
             base_crash_pen = 2.0 * (speed / self.agent.max_speed)
-            # If threatened, reduce crash penalty (Panic braking is better than death)
             if threat_detected: reward -= base_crash_pen * 0.5
             else: reward -= base_crash_pen
 
-        # --- TERMINATION ---
+        # --- 7. TERMINATION ---
         if hit_wall:
             reward -= 50 
             self.cum_penalty_collision -= 50
@@ -481,17 +667,15 @@ class DroneEnv(gym.Env):
                 self.explosion_manager.add(self.agent.position[0], self.agent.position[1])
         
         elif self.agent.rect.colliderect(self.target):
-            # HIT TARGET
+            # [FIXED] Scavenger Hunt Logic
             if self.dynamic_target:
-                # SCAVENGER MODE: Reward + Respawn Target
-                reward += 20 # Big burst reward
+                reward += 20 
                 self.cum_reward_win += 20
-                self._relocate_target()
-                self._recalc_path() # Path to NEW target
+                self._relocate_target() # Move target
+                self._recalc_path()     # Update A* to new target
                 self.last_dist = np.linalg.norm(np.array(self.target.center) - self.agent.position)
-                # DO NOT TERMINATE
+                # Does NOT terminate
             else:
-                # CLASSIC MISSION MODE
                 reward += 100
                 self.cum_reward_win += 100
                 terminated = True
@@ -504,7 +688,7 @@ class DroneEnv(gym.Env):
         if self.render_mode == "human": self.render()
         
         return obs, reward, terminated, truncated, {}
-
+    
     # ==========================================
     # MAP GENERATORS
     # ==========================================
@@ -531,66 +715,76 @@ class DroneEnv(gym.Env):
     
     def _generate_urban(self):
         """
-        Operational urban environment.
-        More realistic than Manhattan maze:
-        - Wide main roads (escape routes)
-        - Narrow alleys (ambush risk)
-        - Open plazas (danger zones)
-        - Varying building sizes
+        Generates a Randomized Manhattan grid using OPTIMIZED BIG RECTANGLES.
+        Includes Grid Shifting and Random Gaps to prevent overfitting.
         """
         rows = self.ROWS
+        pixel_size = 10
         
-        # Main roads (cross pattern) - guaranteed escape routes
-        road_width = 8  # Wide enough for maneuvering
-        mid = rows // 2
+        # Configuration
+        block_size = 14 
+        street_width = 6 
         
-        # Don't block the main roads
-        blocked = set()
-        for i in range(rows):
-            for w in range(road_width):
-                blocked.add((mid - road_width//2 + w, i))  # Vertical road
-                blocked.add((i, mid - road_width//2 + w))  # Horizontal road
+        self.urban_walls = [] 
         
-        # City blocks with varying sizes
-        block_configs = [
-            (8, 12),   # Small blocks
-            (12, 16),  # Medium blocks
-            (16, 22),  # Large blocks
-        ]
+        step = block_size + street_width
         
-        # Quadrant-based generation (avoid roads)
-        quadrants = [
-            (2, 2, mid - road_width//2 - 2, mid - road_width//2 - 2),
-            (mid + road_width//2 + 2, 2, rows - 2, mid - road_width//2 - 2),
-            (2, mid + road_width//2 + 2, mid - road_width//2 - 2, rows - 2),
-            (mid + road_width//2 + 2, mid + road_width//2 + 2, rows - 2, rows - 2),
-        ]
+        # 1. RANDOM GRID SHIFT (Prevents coordinate memorization)
+        # Shift the whole city by 0-5 blocks (0-50px)
+        shift_x = np.random.randint(0, 6)
+        shift_y = np.random.randint(0, 6)
         
-        for qx1, qy1, qx2, qy2 in quadrants:
-            # Fill quadrant with buildings
-            x = qx1
-            while x < qx2 - 5:
-                y = qy1
-                while y < qy2 - 5:
-                    # Random building size
-                    min_size, max_size = block_configs[np.random.randint(0, 3)]
-                    bw = np.random.randint(min_size - 4, min_size)
-                    bh = np.random.randint(min_size - 4, min_size)
-                    
-                    # Ensure we don't exceed quadrant
-                    bw = min(bw, qx2 - x - 2)
-                    bh = min(bh, qy2 - y - 2)
-                    
-                    if bw > 3 and bh > 3:
-                        for i in range(bw):
-                            for j in range(bh):
-                                px, py = x + i, y + j
-                                if (px, py) not in blocked and 0 <= px < rows and 0 <= py < rows:
-                                    self.grid.grid[px][py].make_obstacle()
-                    
-                    y += bh + np.random.randint(4, 8)  # Street width varies
-                x += np.random.randint(8, 14)
-    
+        for grid_x in range(2, rows - step, step):
+            for grid_y in range(2, rows - step, step):
+                
+                # 2. RANDOM GAPS (Topology Variation)
+                # 15% chance a building is missing (becomes a park/open lot)
+                # This ensures the maze layout changes every episode
+                if np.random.random() < 0.15:
+                    continue
+
+                # Apply shift to grid coordinates
+                gx = grid_x + shift_x
+                gy = grid_y + shift_y
+                
+                # Bounds check (don't draw off-screen)
+                if gx >= rows - 2 or gy >= rows - 2:
+                    continue
+
+                # Define Building Rect
+                bx = gx * pixel_size
+                by = gy * pixel_size
+                bw = block_size * pixel_size
+                bh = block_size * pixel_size
+                
+                # Clip to screen size if necessary
+                if bx + bw > self.SCREEN_WIDTH: bw = self.SCREEN_WIDTH - bx
+                if by + bh > self.SCREEN_HEIGHT: bh = self.SCREEN_HEIGHT - by
+                
+                # Create Physics Wall
+                big_wall = pygame.Rect(bx, by, bw, bh)
+                self.urban_walls.append(big_wall)
+                
+                # Mark Grid Nodes (A* logic)
+                # We iterate relative to the shifted position
+                for i in range(block_size):
+                    for j in range(block_size):
+                        nx, ny = gx + i, gy + j
+                        if 0 <= nx < rows and 0 <= ny < rows:
+                            self.grid.grid[nx][ny].make_obstacle()
+
+        # 3. Clear Central Plaza
+        center_rect = pygame.Rect(300, 300, 200, 200)
+        self.urban_walls = [w for w in self.urban_walls if not w.colliderect(center_rect)]
+        
+        center_grid = rows // 2
+        margin = 10
+        for x in range(center_grid - margin, center_grid + margin):
+            for y in range(center_grid - margin, center_grid + margin):
+                if 0 <= x < rows and 0 <= y < rows:
+                    self.grid.grid[x][y].reset()
+
+
     # ==========================================
     # ENTITY SPAWNING
     # ==========================================

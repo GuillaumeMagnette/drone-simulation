@@ -21,7 +21,7 @@ class Interceptor:
         self.friction = 1.0      
         
         # NEW: Fuel / Lifetime (Seconds)
-        self.lifetime = 4.0
+        self.lifetime = 3.0  # Reduced from 4.0
         
         self.size = size
         self.rect = pygame.Rect(0, 0, self.size, self.size)

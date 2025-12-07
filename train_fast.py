@@ -18,7 +18,7 @@ CURRICULUM_STAGE = 2.0
 STAGES = {
     # Phase 1: Basics
     0:   {"name": "Nav Basics",      "map": "sparse", "threats": 0, "bait": False, "respawn": False, "dynamic": False},
-    1:   {"name": "Evasion Arena",   "map": "arena",  "threats": 2, "bait": False, "respawn": True,  "dynamic": True}, # Moving target in Arena prevents edge camping!
+    1:   {"name": "Evasion Arena",   "map": "arena",  "threats": 1, "bait": False, "respawn": True,  "dynamic": True}, # Moving target in Arena prevents edge camping!
     
     # Phase 2: Scavenger Hunt (The Fix)
     # 2.0: Scavenger Hunt. Run around collecting points while dodging.
@@ -36,7 +36,7 @@ STAGES = {
 # ============================================
 # PERFORMANCE CONFIG
 # ============================================
-NUM_ENVS = 24           # 24 Envs is usually stable for desktop CPUs
+NUM_ENVS = 12           # 24 Envs is usually stable for desktop CPUs
 USE_SUBPROC = True      
 
 class FPSCallback(BaseCallback):
@@ -76,7 +76,7 @@ def make_env(stage_config):
     return _init
 
 def main():
-    models_dir = "models/PPO_Tactical_Enhanced_with_survival"
+    models_dir = "models/PPO_Tactical_Enhanced_Optimized"
     log_dir = "logs"
     os.makedirs(models_dir, exist_ok=True)
     os.makedirs(log_dir, exist_ok=True)
@@ -103,6 +103,10 @@ def main():
     
     model_path = f"{models_dir}/drone_tactical.zip"
     device = "cpu" # MLP is faster on CPU for this observation size
+
+    # Define custom policy kwargs for a bigger brain
+    policy_kwargs = dict(activation_fn=torch.nn.ReLU,
+                         net_arch=dict(pi=[128, 128], vf=[128, 128]))
     
     if os.path.exists(model_path):
         print(f"Loading existing model: {model_path}")
@@ -112,8 +116,14 @@ def main():
         model.rollout_buffer.buffer_size = N_STEPS
     else:
         print("Initializing NEW model...")
-        model = PPO("MlpPolicy", env, learning_rate=3e-4, n_steps=N_STEPS, 
-                   batch_size=BATCH_SIZE, verbose=1, tensorboard_log=log_dir, device=device)
+        model = PPO("MlpPolicy", env, 
+                   policy_kwargs=policy_kwargs, # <--- ADD THIS
+                   learning_rate=3e-4, 
+                   n_steps=N_STEPS, 
+                   batch_size=BATCH_SIZE, 
+                   verbose=1, 
+                   tensorboard_log=log_dir, 
+                   device=device)
     
     TIMESTEPS_PER_ITER = 100_000
     callback = FPSCallback()
