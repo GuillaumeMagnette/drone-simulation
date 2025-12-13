@@ -596,7 +596,13 @@ class DroneEnv(gym.Env):
             for drone in self.swarm:
                 if drone.active:
                     # Pass the whole list so they can separate from each other
-                    drone.update(0.016, self.walls, self.agent, self.swarm)
+                    drone.update(
+                        0.016, 
+                        self.walls, 
+                        self.agent.position, 
+                        self.agent.velocity, 
+                        self.swarm  # <--- THIS WAS MISSING
+                    )
         
         # --- 2. WALL COLLISION ---
         hit_wall = False
@@ -731,7 +737,7 @@ class DroneEnv(gym.Env):
                 if self.current_map_type == 'arena' or self.agent._has_line_of_sight(interceptor.position, self.walls):
                     threat_detected = True
             
-            # --- TRAJECTORY PAIN (The Dodge Signal) ---
+            # Trajectory Pain (The "Dodge" Signal)
             vec_to_future = future_agent_pos - interceptor.position
             dist_raw = np.linalg.norm(vec_to_future)
             
@@ -747,9 +753,29 @@ class DroneEnv(gym.Env):
                         safety_radius = 40.0
                         
                         if miss_dist < safety_radius:
-                            intensity = 1.0 - (miss_dist / safety_radius)
-                            # [CHANGED] Boosted Penalty: Make the Kill Tube feel like Lava
-                            reward -= intensity * 3.0 
+                            # [NEW] SHADOW CHECK
+                            # Check if a dummy is blocking the line of fire
+                            is_shadowed = False
+                            if self.use_bait:
+                                # Define the line of fire (Missile -> Agent)
+                                p1 = interceptor.position
+                                p2 = future_agent_pos
+                                
+                                for drone in self.swarm:
+                                    if drone.active:
+                                        # Does the drone block this line?
+                                        if drone.rect.clipline(p1, p2):
+                                            is_shadowed = True
+                                            break
+                            
+                            # Only apply pain if NOT shadowed
+                            if not is_shadowed:
+                                intensity = 1.0 - (miss_dist / safety_radius)
+                                reward -= intensity * 3.0 # The Pain
+                            else:
+                                # Optional: Small "Comfort" reward for being in the shadow?
+                                # Usually 0.0 (Relief) is enough, but +0.1 speeds up learning.
+                                reward += 0.1
 
                 # --- NEW: TOP GUN BONUS (Evasion Geometry) ---
                 # Reward moving perpendicular to the missile

@@ -1,5 +1,5 @@
 """
-EMERGENT SWARM VIEWER v3 - With Frozen Partner Visualization
+EMERGENT SWARM VIEWER v4 - With Frozen Partner Visualization
 =============================================================
 
 Visual validation tool that shows:
@@ -29,18 +29,44 @@ except ImportError:
     HAS_SB3 = False
     print("Warning: stable_baselines3 not found, using random actions")
 
-from drone_env_marl_v2 import DroneEnvMARL_V2, BUILDING_HEIGHT
+from drone_env_marl_v3 import DroneEnvMARL_V3, BUILDING_HEIGHT
 
 # Model paths
-MODELS_DIR = "models/SwarmV3"
+MODELS_DIR = "models/SwarmV4"
 
-# Stage configurations matching train_swarm_v3.py
+# Stage configurations matching train_swarm_v4.py (NEW CURRICULUM)
+# Key change: Stages 2-3 now have threats (evasion training)
 STAGES = {
-    1.0: {"name": "Solo Flight", "n_agents": 1, "n_frozen": 0, "threats": False, "max_missiles": 0},
-    2.0: {"name": "Duo (1L+1F)", "n_agents": 2, "n_frozen": 1, "threats": False, "max_missiles": 0},
-    3.0: {"name": "Squad (1L+2F)", "n_agents": 3, "n_frozen": 2, "threats": False, "max_missiles": 0},
-    4.0: {"name": "Light Combat", "n_agents": 3, "n_frozen": 0, "threats": True, "max_missiles": 1},
-    5.0: {"name": "Full Combat", "n_agents": 3, "n_frozen": 0, "threats": True, "max_missiles": 2},
+    1.0: {
+        "name": "Solo Navigation (No Threats)",
+        "n_agents": 1, "n_frozen": 0,
+        "threats": False, "max_missiles": 0,
+        "sam_rotation_speed": 2.0, "sam_lock_time": 0.5, "missile_speed": 550,
+    },
+    2.0: {
+        "name": "Solo Evasion (Easy)",
+        "n_agents": 1, "n_frozen": 0,
+        "threats": True, "max_missiles": 1,
+        "sam_rotation_speed": 1.0, "sam_lock_time": 1.0, "missile_speed": 350,
+    },
+    3.0: {
+        "name": "Solo Evasion (Hard)",
+        "n_agents": 1, "n_frozen": 0,
+        "threats": True, "max_missiles": 1,
+        "sam_rotation_speed": 2.0, "sam_lock_time": 0.5, "missile_speed": 550,
+    },
+    4.0: {
+        "name": "Duo Combat",
+        "n_agents": 2, "n_frozen": 0,
+        "threats": True, "max_missiles": 1,
+        "sam_rotation_speed": 2.0, "sam_lock_time": 0.5, "missile_speed": 550,
+    },
+    5.0: {
+        "name": "Squad Combat (Full)",
+        "n_agents": 3, "n_frozen": 0,
+        "threats": True, "max_missiles": 2,
+        "sam_rotation_speed": 2.0, "sam_lock_time": 0.5, "missile_speed": 550,
+    },
 }
 
 
@@ -52,11 +78,14 @@ class SwarmViewer:
     def __init__(self):
         pygame.init()
         
-        self.current_stage = 1.0
+        # Auto-detect latest available stage
+        self.current_stage = self._detect_latest_stage()
         self.stage_config = STAGES[self.current_stage]
         
+        print(f"Auto-detected stage: {self.current_stage}")
+        
         # Create environment
-        self.env = DroneEnvMARL_V2(
+        self.env = DroneEnvMARL_V3(
             render_mode=None,  # We'll do custom rendering
             n_agents=self.stage_config["n_agents"]
         )
@@ -66,7 +95,7 @@ class SwarmViewer:
         # Display
         self.screen_size = 1200
         self.screen = pygame.display.set_mode((self.screen_size, self.screen_size))
-        pygame.display.set_caption("Swarm Viewer v3 - Frozen Partners")
+        pygame.display.set_caption("Swarm Viewer v4 - Frozen Partners")
         self.clock = pygame.time.Clock()
         self.font = pygame.font.SysFont(None, 24)
         self.small_font = pygame.font.SysFont(None, 18)
@@ -88,6 +117,18 @@ class SwarmViewer:
         # Reset
         self.obs, _ = self.env.reset()
     
+    def _detect_latest_stage(self):
+        """Auto-detect the latest stage with a saved model."""
+        latest_stage = 1.0  # Default
+        
+        for stage in sorted(STAGES.keys(), reverse=True):
+            path = f"{MODELS_DIR}/swarm_v4_stage_{stage:.1f}.zip"
+            if os.path.exists(path):
+                latest_stage = stage
+                break
+        
+        return latest_stage
+    
     def load_models(self):
         """Load learner and frozen models for current stage."""
         if not HAS_SB3:
@@ -96,7 +137,7 @@ class SwarmViewer:
         stage = self.current_stage
         
         # Learner model (current stage)
-        learner_path = f"{MODELS_DIR}/swarm_v3_stage_{stage:.1f}.zip"
+        learner_path = f"{MODELS_DIR}/swarm_v4_stage_{stage:.1f}.zip"
         if os.path.exists(learner_path):
             try:
                 self.learner_model = PPO.load(learner_path, device="cpu")
@@ -108,7 +149,7 @@ class SwarmViewer:
             # Try previous stages
             for s in sorted(STAGES.keys(), reverse=True):
                 if s <= stage:
-                    path = f"{MODELS_DIR}/swarm_v3_stage_{s:.1f}.zip"
+                    path = f"{MODELS_DIR}/swarm_v4_stage_{s:.1f}.zip"
                     if os.path.exists(path):
                         try:
                             self.learner_model = PPO.load(path, device="cpu")
@@ -120,9 +161,10 @@ class SwarmViewer:
                 print("✗ No learner model found, using random")
                 self.learner_model = None
         
-        # Frozen model (previous stage)
-        if stage > 1.0:
-            frozen_path = f"{MODELS_DIR}/swarm_v3_stage_{stage - 1.0:.1f}.zip"
+        # Frozen model (only if stage uses frozen partners)
+        n_frozen = self.stage_config.get("n_frozen", 0)
+        if n_frozen > 0 and stage > 1.0:
+            frozen_path = f"{MODELS_DIR}/swarm_v4_stage_{stage - 1.0:.1f}.zip"
             if os.path.exists(frozen_path):
                 try:
                     self.frozen_model = PPO.load(frozen_path, device="cpu")
@@ -132,6 +174,10 @@ class SwarmViewer:
                     self.frozen_model = self.learner_model  # Fallback
             else:
                 self.frozen_model = self.learner_model  # Use same model
+        elif n_frozen == 0 and self.stage_config["n_agents"] > 1:
+            # Shared policy mode - all agents use learner model
+            self.frozen_model = self.learner_model
+            print(f"  Shared policy mode: All {self.stage_config['n_agents']} agents use learner model")
         else:
             self.frozen_model = None
     
@@ -148,13 +194,24 @@ class SwarmViewer:
         # Recreate environment if agent count changed
         if self.env.n_agents != self.stage_config["n_agents"]:
             self.env.close()
-            self.env = DroneEnvMARL_V2(
+            self.env = DroneEnvMARL_V3(
                 render_mode=None,
                 n_agents=self.stage_config["n_agents"]
             )
         
+        # Apply curriculum parameters
         self.env.active_threats = self.stage_config["threats"]
         self.env.max_missiles = self.stage_config["max_missiles"]
+        
+        # SAM difficulty parameters
+        self.env.sam_rotation_speed = self.stage_config.get("sam_rotation_speed", 2.0)
+        self.env.sam_lock_required = self.stage_config.get("sam_lock_time", 0.5)
+        self.env.missile_speed = self.stage_config.get("missile_speed", 550)
+        
+        if self.stage_config["threats"]:
+            print(f"    SAM: rotation={self.env.sam_rotation_speed} rad/s, "
+                  f"lock={self.env.sam_lock_required}s, "
+                  f"missile_speed={self.env.missile_speed}")
         
         # Reload models
         self.load_models()
@@ -224,6 +281,47 @@ class SwarmViewer:
         # SAM site
         pygame.draw.circle(self.screen, (200, 0, 0), env.hazard_source, 15)
         pygame.draw.circle(self.screen, (150, 0, 0), env.hazard_source, 25, 2)
+        
+        # SAM aim direction (visual feedback for tracking)
+        if env.active_threats:
+            aim_length = 80 + (env.sam_lock_time / env.sam_lock_required) * 120
+            aim_end = (
+                int(env.hazard_source[0] + env.sam_aim_direction[0] * aim_length),
+                int(env.hazard_source[1] + env.sam_aim_direction[1] * aim_length)
+            )
+            
+            # Color based on lock status
+            if env.sam_lock_time >= env.sam_lock_required:
+                aim_color = (255, 0, 0)  # RED = LOCKED
+                line_width = 4
+            elif env.sam_lock_time > 0:
+                lock_ratio = env.sam_lock_time / env.sam_lock_required
+                aim_color = (255, int(255 * (1 - lock_ratio)), 0)
+                line_width = 2
+            else:
+                aim_color = (100, 100, 0)  # Dim yellow = searching
+                line_width = 1
+            
+            pygame.draw.line(self.screen, aim_color, env.hazard_source, aim_end, line_width)
+            
+            # Detection cone
+            cone_length = 150
+            cone_angle = 0.52
+            import math
+            left_dir = (
+                env.sam_aim_direction[0] * math.cos(cone_angle) - env.sam_aim_direction[1] * math.sin(cone_angle),
+                env.sam_aim_direction[0] * math.sin(cone_angle) + env.sam_aim_direction[1] * math.cos(cone_angle)
+            )
+            right_dir = (
+                env.sam_aim_direction[0] * math.cos(-cone_angle) - env.sam_aim_direction[1] * math.sin(-cone_angle),
+                env.sam_aim_direction[0] * math.sin(-cone_angle) + env.sam_aim_direction[1] * math.cos(-cone_angle)
+            )
+            left_end = (int(env.hazard_source[0] + left_dir[0] * cone_length),
+                       int(env.hazard_source[1] + left_dir[1] * cone_length))
+            right_end = (int(env.hazard_source[0] + right_dir[0] * cone_length),
+                        int(env.hazard_source[1] + right_dir[1] * cone_length))
+            pygame.draw.line(self.screen, (80, 80, 0), env.hazard_source, left_end, 1)
+            pygame.draw.line(self.screen, (80, 80, 0), env.hazard_source, right_end, 1)
         
         # Target
         pygame.draw.circle(self.screen, (0, 255, 0), env.target.center, 20)
@@ -410,7 +508,7 @@ class SwarmViewer:
 
 def print_help():
     print("\n" + "="*60)
-    print("  SWARM VIEWER v3 - Frozen Partners")
+    print("  SWARM VIEWER v4 - Frozen Partners")
     print("="*60)
     print("\n  STAGES:")
     for s, cfg in STAGES.items():

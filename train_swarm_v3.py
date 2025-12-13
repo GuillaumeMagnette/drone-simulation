@@ -1,5 +1,5 @@
 """
-EMERGENT SWARM TRAINING v3 - Progressive Curriculum with Frozen Partners
+EMERGENT SWARM TRAINING v4 - Progressive Curriculum with Frozen Partners
 =========================================================================
 
 Key Innovation:
@@ -31,59 +31,99 @@ import gymnasium as gym
 from gymnasium import spaces
 
 # Import base environment
-from drone_env_marl_v2 import DroneEnvMARL_V2
+from drone_env_marl_v3 import DroneEnvMARL_V3
 
 # ============================================
 # CURRICULUM CONFIGURATION
 # ============================================
+# 
+# NEW DESIGN PHILOSOPHY:
+# 1. Navigation first (no threats)
+# 2. Evasion second (solo + threats, gradually harder)
+# 3. Coordination last (multi-agent + threats)
+#
+# Key insight: Agents must learn to SURVIVE before learning to COORDINATE.
+# The old curriculum skipped evasion entirely, so agents learned
+# "go straight to target" which becomes "go straight to death" when
+# missiles are added.
+#
 
 CURRICULUM = {
+    # ─────────────────────────────────────────────────────────
+    # PHASE 1: NAVIGATION
+    # ─────────────────────────────────────────────────────────
     1.0: {
-        "name": "Solo Flight",
+        "name": "Solo Navigation",
         "n_agents": 1,
-        "n_frozen": 0,  # No frozen partners
+        "n_frozen": 0,
         "threats": False,
         "max_missiles": 0,
+        # SAM params (not used but included for consistency)
+        "sam_rotation_speed": 1.0,
+        "sam_lock_time": 0.5,
+        "missile_speed": 550,
         "advance_reward": 40.0,
     },
+    
+    # ─────────────────────────────────────────────────────────
+    # PHASE 2: EVASION (the critical missing piece!)
+    # ─────────────────────────────────────────────────────────
     2.0: {
-        "name": "Duo (1 Learner + 1 Frozen)",
-        "n_agents": 2,
-        "n_frozen": 1,  # 1 frozen partner using Stage 1 policy
-        "threats": False,
-        "max_missiles": 0,
-        "advance_reward": 60.0,
+        "name": "Solo Evasion (Easy)",
+        "n_agents": 1,
+        "n_frozen": 0,
+        "threats": True,  # MISSILES NOW!
+        "max_missiles": 1,
+        # EASY SAM: Slow rotation, long lock time, slow missiles
+        "sam_rotation_speed": 1.0,   # Half speed rotation
+        "sam_lock_time": 1.0,        # Double lock time (more time to react)
+        "missile_speed": 350,        # Slower missiles (can outrun)
+        "advance_reward": 20.0,      # Lower threshold (deaths expected)
     },
     3.0: {
-        "name": "Squad (1 Learner + 2 Frozen)",
-        "n_agents": 3,
-        "n_frozen": 2,  # 2 frozen partners using Stage 2 policy
-        "threats": False,
-        "max_missiles": 0,
-        "advance_reward": 80.0,
-    },
-    4.0: {
-        "name": "Light Combat (1 Learner + 2 Frozen)",
-        "n_agents": 3,
-        "n_frozen": 2,  # All agents now share the learning policy
-        "threats": True,
-        "max_missiles": 1,
-        "advance_reward": 60.0,
-    },
-    5.0: {
-        "name": "Light Combat (Shared Policy)",
-        "n_agents": 3,
+        "name": "Solo Evasion (Hard)",
+        "n_agents": 1,
         "n_frozen": 0,
         "threats": True,
         "max_missiles": 1,
+        # NORMAL SAM: faster missile
+        "sam_rotation_speed": 1.0,
+        "sam_lock_time": 0.5,
+        "missile_speed": 550,
+        "advance_reward": 25.0,
+    },
+    
+    # ─────────────────────────────────────────────────────────
+    # PHASE 3: COORDINATION (now with evasion skills!)
+    # ─────────────────────────────────────────────────────────
+    4.0: {
+        "name": "Duo Combat",
+        "n_agents": 2,
+        "n_frozen": 0,  # Shared policy
+        "threats": True,
+        "max_missiles": 2,
+        "sam_rotation_speed": 1.0,
+        "sam_lock_time": 0.3,
+        "missile_speed": 550,
+        "advance_reward": 35.0,
+    },
+    5.0: {
+        "name": "Squad Combat (Full)",
+        "n_agents": 3,
+        "n_frozen": 0,
+        "threats": True,
+        "max_missiles": 2,
+        "sam_rotation_speed": 2.0,
+        "sam_lock_time": 0.3,
+        "missile_speed": 550,
         "advance_reward": None,  # Final stage
     },
 }
 
-CURRENT_STAGE = 4.0
-NUM_ENVS = 16
+CURRENT_STAGE = 1.0
+NUM_ENVS = 24
 CHECKPOINT_INTERVAL = 100_000
-AUTO_ADVANCE = True
+AUTO_ADVANCE = False
 
 # Live Reload Configuration
 # When enabled, frozen partners reload the latest checkpoint periodically.
@@ -113,6 +153,7 @@ class HybridSwarmEnv(gym.Env):
     """
     
     def __init__(self, n_agents, n_frozen, frozen_model_path, threats, max_missiles,
+                 sam_rotation_speed=2.0, sam_lock_time=0.5, missile_speed=550,
                  live_reload_path=None):
         super().__init__()
         
@@ -121,9 +162,15 @@ class HybridSwarmEnv(gym.Env):
         self.n_learners = n_agents - n_frozen  # Should be 1 for stages 1-3
         
         # Create the underlying multi-agent environment
-        self.env = DroneEnvMARL_V2(render_mode=None, n_agents=n_agents)
+        self.env = DroneEnvMARL_V3(render_mode=None, n_agents=n_agents)
         self.env.active_threats = threats
         self.env.max_missiles = max_missiles
+        
+        # SAM difficulty parameters (curriculum-controlled)
+        self.env.sam_rotation_speed = sam_rotation_speed
+        self.env.sam_lock_required = sam_lock_time
+        self.env.missile_speed = missile_speed
+        # Note: target is ALWAYS the SAM position now (handled in env)
         
         # Single-agent observation/action space (for the learner)
         self.obs_dim = 50  # Single agent observation
@@ -172,34 +219,57 @@ class HybridSwarmEnv(gym.Env):
     
     def step(self, learner_action):
         # Periodic reload of frozen policy (self-play dynamic)
-        self.reload_counter += 1
-        if self.live_reload_path and self.reload_counter >= self.reload_interval:
-            self.reload_counter = 0
-            self._load_frozen_policy()
+        if self.n_frozen > 0:
+            self.reload_counter += 1
+            if self.live_reload_path and self.reload_counter >= self.reload_interval:
+                self.reload_counter = 0
+                self._load_frozen_policy()
         
         # Build full action array for all agents
         full_action = np.zeros(self.n_agents * 3, dtype=np.float32)
         
-        # Agent 0 = Learner
+        # Agent 0 = Learner (always uses the provided action)
         full_action[0:3] = learner_action
         
-        # Agents 1+ = Frozen partners
         if self.n_frozen > 0:
-            # Get observations for frozen agents
-            # We need to query the environment's internal state
+            # FROZEN MODE: Agents 1+ use frozen policy
             for i in range(1, self.n_agents):
                 frozen_obs = self.env._get_single_agent_obs(i)
                 
                 if self.frozen_policy is not None:
-                    # Use frozen policy to get action
                     frozen_action, _ = self.frozen_policy.predict(
                         frozen_obs, deterministic=True
                     )
                 else:
-                    # Random action fallback
                     frozen_action = np.random.uniform(-1, 1, 3).astype(np.float32)
                 
                 full_action[i*3:(i+1)*3] = frozen_action
+        else:
+            # SHARED POLICY MODE: Agents 1+ use the SAME policy as agent 0
+            # We need to query the current learner policy for each agent's obs
+            # But we don't have access to it here... 
+            # 
+            # SOLUTION: Store actions for all agents from the last policy call.
+            # This requires a different architecture - see SharedPolicyWrapper below.
+            #
+            # For now, we use a simpler approach: all agents mirror agent 0's action
+            # scaled by their own observation similarity. This is a placeholder.
+            #
+            # TODO: Implement proper shared policy in VecEnv wrapper
+            #
+            # TEMPORARY: Use the frozen policy (which should be latest checkpoint)
+            # This effectively makes all agents use the same trained policy
+            if self.frozen_policy is not None:
+                for i in range(1, self.n_agents):
+                    agent_obs = self.env._get_single_agent_obs(i)
+                    agent_action, _ = self.frozen_policy.predict(
+                        agent_obs, deterministic=False  # Allow exploration
+                    )
+                    full_action[i*3:(i+1)*3] = agent_action
+            else:
+                # No policy available - random actions as fallback
+                for i in range(1, self.n_agents):
+                    full_action[i*3:(i+1)*3] = np.random.uniform(-1, 1, 3).astype(np.float32)
         
         # Step the environment with all actions
         full_obs, reward, terminated, truncated, info = self.env.step(full_action)
@@ -231,7 +301,7 @@ class SharedPolicySwarmEnv(gym.Env):
         self.obs_dim = 50  # Per-agent observation
         
         # Create underlying environment
-        self.env = DroneEnvMARL_V2(render_mode=None, n_agents=n_agents)
+        self.env = DroneEnvMARL_V3(render_mode=None, n_agents=n_agents)
         self.env.active_threats = threats
         self.env.max_missiles = max_missiles
         
@@ -351,43 +421,45 @@ class CurriculumCallback(BaseCallback):
 def make_hybrid_env(stage_config, frozen_model_path, live_reload_path=None):
     """Factory for HybridSwarmEnv with optional live reload."""
     def _init():
-        if stage_config["n_frozen"] > 0:
-            return HybridSwarmEnv(
-                n_agents=stage_config["n_agents"],
-                n_frozen=stage_config["n_frozen"],
-                frozen_model_path=frozen_model_path,
-                threats=stage_config["threats"],
-                max_missiles=stage_config["max_missiles"],
-                live_reload_path=live_reload_path
-            )
-        else:
-            # No frozen partners - but still use single-agent interface
-            # for consistent observation space
-            return HybridSwarmEnv(
-                n_agents=stage_config["n_agents"],
-                n_frozen=0,
-                frozen_model_path=None,
-                threats=stage_config["threats"],
-                max_missiles=stage_config["max_missiles"],
-                live_reload_path=None
-            )
+        # For shared policy mode (n_frozen=0), we STILL need the frozen policy
+        # to be loaded so all agents can use it. The "frozen" policy in this case
+        # is actually the latest checkpoint of the learning policy.
+        effective_frozen_path = frozen_model_path
+        effective_reload_path = live_reload_path
+        
+        # In shared policy mode, make sure we have a policy to use
+        if stage_config["n_frozen"] == 0 and live_reload_path:
+            effective_frozen_path = live_reload_path
+            effective_reload_path = live_reload_path
+        
+        return HybridSwarmEnv(
+            n_agents=stage_config["n_agents"],
+            n_frozen=stage_config["n_frozen"],
+            frozen_model_path=effective_frozen_path,
+            threats=stage_config["threats"],
+            max_missiles=stage_config["max_missiles"],
+            sam_rotation_speed=stage_config.get("sam_rotation_speed", 2.0),
+            sam_lock_time=stage_config.get("sam_lock_time", 0.5),
+            missile_speed=stage_config.get("missile_speed", 550),
+            live_reload_path=effective_reload_path
+        )
     return _init
 
 
 def get_model_path(models_dir, stage):
-    return f"{models_dir}/swarm_v3_stage_{stage:.1f}.zip"
+    return f"{models_dir}/swarm_v4_stage_{stage:.1f}.zip"
 
 
 def main():
-    models_dir = "models/SwarmV3"
-    log_dir = "logs_swarm_v3"
+    models_dir = "models/SwarmV4"
+    log_dir = "logs_swarm_v4"
     os.makedirs(models_dir, exist_ok=True)
     os.makedirs(log_dir, exist_ok=True)
     
     current_stage = CURRENT_STAGE
     
     print("\n" + "="*60)
-    print("  EMERGENT SWARM TRAINING v3")
+    print("  EMERGENT SWARM TRAINING v4")
     print("  Progressive Curriculum with Frozen Partners")
     print("="*60)
     
@@ -395,9 +467,12 @@ def main():
         stage_config = CURRICULUM[current_stage]
         
         print(f"\n>>> STAGE {current_stage}: {stage_config['name']}")
-        print(f"    Total Agents: {stage_config['n_agents']}")
-        print(f"    Frozen Partners: {stage_config['n_frozen']}")
-        print(f"    Threats: {stage_config['threats']}")
+        print(f"    Agents: {stage_config['n_agents']} (Frozen: {stage_config['n_frozen']})")
+        print(f"    Threats: {stage_config['threats']} (Max missiles: {stage_config['max_missiles']})")
+        if stage_config['threats']:
+            print(f"    SAM Difficulty: rotation={stage_config.get('sam_rotation_speed', 2.0)} rad/s, "
+                  f"lock={stage_config.get('sam_lock_time', 0.5)}s, "
+                  f"missile_speed={stage_config.get('missile_speed', 550)}")
         
         # Determine frozen model path (from previous stage)
         frozen_model_path = None
@@ -412,9 +487,14 @@ def main():
         
         if LIVE_RELOAD_ENABLED and stage_config["n_frozen"] > 0:
             live_reload_path = model_path
-            print(f"    Live Reload ENABLED: Frozen partners update every {LIVE_RELOAD_INTERVAL} steps")
+            print(f"    Mode: 1 Learner + {stage_config['n_frozen']} Frozen (reloads every {LIVE_RELOAD_INTERVAL} steps)")
+        elif stage_config["n_frozen"] == 0 and stage_config["n_agents"] > 1:
+            live_reload_path = model_path
+            print(f"    Mode: SHARED POLICY - All {stage_config['n_agents']} agents use same policy")
+            print(f"    (Agents 1+ use latest checkpoint, Agent 0 uses live training policy)")
         else:
             live_reload_path = None
+            print(f"    Mode: Single agent")
         
         # Create environments
         def make_env():
@@ -485,7 +565,7 @@ def main():
                     next_stage = current_stage + 1.0
                     if next_stage in CURRICULUM:
                         print(f"\n>>> ADVANCING TO STAGE {next_stage}!")
-                        final_path = f"{models_dir}/swarm_v3_stage_{current_stage:.1f}_final.zip"
+                        final_path = f"{models_dir}/swarm_v4_stage_{current_stage:.1f}_final.zip"
                         model.save(final_path)
                         current_stage = next_stage
                         env.close()

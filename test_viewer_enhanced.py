@@ -9,7 +9,7 @@ import pygame
 import numpy as np
 import time
 
-MODEL_PATH = "models/PPO_Tactical_Enhanced_Optimized_v2/drone_tactical"
+MODEL_PATH = "models/PPO_Tactical_Enhanced_Optimized_v3/drone_tactical"
 
 # ALIGNED WITH TRAIN_FAST.PY
 SCENARIOS = {

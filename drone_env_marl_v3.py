@@ -259,7 +259,7 @@ class Interceptor3D:
         return True
 
 
-class DroneEnvMARL_V2(gym.Env):
+class DroneEnvMARL_V3(gym.Env):
     """
     Emergent Swarm Tactics Environment.
     
@@ -479,18 +479,19 @@ class DroneEnvMARL_V2(gym.Env):
         for ag in self.agents:
             if ag.active and not ag.events.get("scored_this_target", False):
                 dist = np.linalg.norm(ag.position[:2] - np.array(self.target.center))
-                # Must be close AND low (actually touching the target)
-                if dist < 35 and ag.position[2] < 30:
+                # Must be close to target (any altitude - target is on ground but agents can strike from above)
+                if dist < 35:
                     agents_scoring.append(ag)
                     ag.events["scored_this_target"] = True
                     # IMMEDIATE reward for this agent
-                    reward += 40.0
+                    reward += 20.0
                     self.episode_stats["targets_hit"] += 1
         
         n_scoring = len(agents_scoring)
         if n_scoring > 0:
-            # Start or extend scoring window
-            self._scoring_window = 10  # 10 frames window (~160ms)
+            # Start scoring window (but don't extend if already running)
+            if self._scoring_window == 0:
+                self._scoring_window = 10  # 10 frames window (~160ms)
             self._scoring_agents.extend(agents_scoring)
         
         # Process scoring window
@@ -1042,7 +1043,7 @@ class DroneEnvMARL_V2(gym.Env):
 # ============================================================
 if __name__ == "__main__":
     # Quick test
-    env = DroneEnvMARL_V2(render_mode="human", n_agents=3)
+    env = DroneEnvMARL_V3(render_mode="human", n_agents=3)
     obs, _ = env.reset(options={'active_threats': True})
     
     print(f"Observation shape: {obs.shape}")
