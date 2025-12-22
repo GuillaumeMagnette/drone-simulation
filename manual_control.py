@@ -16,7 +16,6 @@ def get_human_action(n_agents):
     keys = pygame.key.get_pressed()
     
     # 1. Angle (Left/Right Arrows)
-    # Map to -1 (Left) to 1 (Right)
     angle_cmd = 0.0
     if keys[pygame.K_LEFT]:  angle_cmd = -0.5  # 90 deg Left
     if keys[pygame.K_RIGHT]: angle_cmd = 0.5   # 90 deg Right
@@ -24,18 +23,15 @@ def get_human_action(n_agents):
     if keys[pygame.K_DOWN]:  angle_cmd = 1.0   # Retreat
     
     # 2. Distance (W/S Keys)
-    # Map to -1 (0m) to 1 (400m)
     dist_cmd = 0.0 # Default ~200m
     if keys[pygame.K_w]: dist_cmd = 0.8  # Far
     if keys[pygame.K_s]: dist_cmd = -0.8 # Close
     
     # 3. Altitude (Spacebar)
-    # High (>0) or Low (<0)
     alt_cmd = -1.0
     if keys[pygame.K_SPACE]: alt_cmd = 1.0
     
     # Create action for Agent 0
-    # For now, we only control the first agent, others get zeros
     action = np.zeros(n_agents * 3, dtype=np.float32)
     action[0] = dist_cmd
     action[1] = angle_cmd
@@ -44,8 +40,15 @@ def get_human_action(n_agents):
     return action
 
 def main():
+    # --- FIX 1: Initialize Pygame explicitly ---
+    pygame.init()
+    
     env = DroneEnvCommander(render_mode="human", n_agents=1)
     obs, info = env.reset()
+    
+    # --- FIX 2: Create the window immediately ---
+    # We must render once so the window exists to capture keystrokes
+    env.render()
     
     print("\n--- MANUAL COMMANDER MODE ---")
     print("ARROWS:  Issue Direction Command (Relative to Green Target)")
@@ -55,24 +58,29 @@ def main():
     print("-----------------------------")
     
     running = True
-    while running:
-        # Get Action from Keyboard
-        action = get_human_action(env.n_agents)
-        
-        # Step Environment
-        # Note: This runs 30 physics ticks (0.5s). 
-        # Control feel will be "Strategy Game" pace, not "Flight Sim" pace.
-        obs, reward, terminated, truncated, info = env.step(action)
-        
-        # Check for window close inside the loop
-        if terminated or truncated:
-            obs, info = env.reset()
-            
-        # Optional: Print debug info
-        # agent_pos = env.agents[0].position
-        # print(f"Rew: {reward:.1f} | Alt: {agent_pos[2]:.1f}")
+    try:
+        while running:
+            # --- FIX 3: Process Window Events ---
+            # This pumps the event loop so pygame.key.get_pressed() updates
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    running = False
 
-    env.close()
+            # Get Action from Keyboard
+            action = get_human_action(env.n_agents)
+            
+            # Step Environment
+            obs, reward, terminated, truncated, info = env.step(action)
+            
+            if terminated or truncated:
+                print(f"Episode Done. Reward: {reward:.1f}")
+                obs, info = env.reset()
+                
+    except KeyboardInterrupt:
+        print("User cancelled.")
+    finally:
+        env.close()
+        pygame.quit()
 
 if __name__ == "__main__":
     main()
