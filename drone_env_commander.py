@@ -1,10 +1,11 @@
 """
-DRONE ENVIRONMENT COMMANDER (v8 - MULTI-AGENT PHYSICS)
-======================================================
+DRONE ENVIRONMENT COMMANDER (v9 - SHARED REWARD)
+================================================
 Updates:
-- Integrated SAMSite (Turret Physics).
-- Multi-Agent Observations (Teammate awareness).
-- "Tracked" Signal (Agent knows if SAM is aiming at it).
+- Shared Reward: +100 to ALL agents if ONE scores.
+- Reduced Death Penalty: -10 (Encourages sacrifice).
+- Bravery Bonus: +0.2 for staying in the danger zone.
+- Difficulty Tune: Overrides SAM speed to 1.2 rad/s.
 """
 
 import gymnasium as gym
@@ -19,7 +20,7 @@ from navigator_v2 import Navigator
 class DroneEnvCommander(gym.Env):
     metadata = {'render_modes': ['human', 'rgb_array']}
 
-    def __init__(self, render_mode=None, n_agents=1):
+    def __init__(self, render_mode=None, n_agents=2):
         super().__init__()
         
         self.SCREEN_SIZE = 1200
@@ -31,10 +32,10 @@ class DroneEnvCommander(gym.Env):
         self.PHYSICS_TICKS_PER_STEP = 30
         self.DT = 0.016
         
+        # Action Space: [Dist, Angle, Alt_Mode]
         self.action_space = spaces.Box(low=-1, high=1, shape=(self.n_agents * 3,), dtype=np.float32)
         
-        # Obs: [Self(4) + Target(3) + Threat(4) + Teammate(5) + SAM_Status(2)] = 18 floats
-        # Padded to 20 for roundness
+        # Obs Space: 20 floats per agent
         self.obs_dim = 20
         self.observation_space = spaces.Box(low=-1, high=1, shape=(self.n_agents * self.obs_dim,), dtype=np.float32)
         
@@ -43,7 +44,7 @@ class DroneEnvCommander(gym.Env):
         self.walls = []
         self.interceptors = []
         self.target_pos = np.array([600.0, 600.0, 10.0])
-        self.sam_site = None # Created in reset
+        self.sam_site = None 
         
         self.current_step_count = 0
         self.max_steps = 400 
@@ -53,16 +54,18 @@ class DroneEnvCommander(gym.Env):
         self.stuck_timers = [0 for _ in range(n_agents)]
         self.last_command_waypoints = [np.zeros(3) for _ in range(n_agents)]
         
-        self._generate_urban_map()
+        self._generate_urban_canyon_map()
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         self.current_step_count = 0
         self.interceptors = []
-        self._generate_urban_map()
+        self._generate_urban_canyon_map()
         
         # Create SAM at target
         self.sam_site = SAMSite(self.target_pos[0], self.target_pos[1])
+        # OVERRIDE: Slow down SAM slightly to allow flanking/baiting tactics
+        self.sam_site.ROTATION_SPEED = 3.0 # rad/s Hardmode as requested
         
         for i, nav in enumerate(self.navigators):
             nav.reset()
@@ -85,17 +88,19 @@ class DroneEnvCommander(gym.Env):
 
     def step(self, action):
         self.current_step_count += 1
-        rewards = 0.0
+        
+        # Initialize rewards for this step
+        rewards = np.zeros(self.n_agents, dtype=np.float32)
+        
         actions = action.reshape((self.n_agents, 3))
         command_waypoints = []
         
-        # 1. COMMANDS
+        # 1. DECODE COMMANDS
         for i, ag in enumerate(self.agents):
             if not ag.active:
                 command_waypoints.append(ag.position)
                 continue
             
-            # Map actions
             dist_cmd = (actions[i][0] + 1) * 200.0
             angle_cmd = actions[i][1] * np.pi
             alt_cmd = actions[i][2]
@@ -116,39 +121,52 @@ class DroneEnvCommander(gym.Env):
 
         # 2. PHYSICS LOOP
         for _ in range(self.PHYSICS_TICKS_PER_STEP):
-            # SAM LOGIC
+            # SAM Logic
             new_missile = self.sam_site.update(self.DT, self.agents, self.walls)
             if new_missile:
                 self.interceptors.append(new_missile)
             
-            # AGENTS
+            # Agents Update
             for i, ag in enumerate(self.agents):
                 if ag.active:
                     force = self.navigators[i].get_control_force(
-                        ag, command_waypoints[i], self.walls, self.interceptors
+                        ag, 
+                        command_waypoints[i],   # The Blue X
+                        self.walls, 
+                        self.interceptors,
+                        true_objective=self.target_pos  # <--- PASS THE GREEN DOT!
                     )
                     ag.update(self.DT, force, self.walls, self.SCREEN_SIZE)
             
-            # MISSILES
+            # Missiles Update
             for m in self.interceptors:
                 m.update(self.DT, self.walls)
-                for ag in self.agents:
+                for i, ag in enumerate(self.agents):
                     if ag.active and m.check_hit(ag):
                         ag.active = False
-                        rewards -= 50.0
+                        # DEATH PENALTY (Small)
+                        # Enough to say "Dying is bad", but small enough to be overridden by Team Win
+                        rewards[i] -= 10.0 
             self.interceptors = [m for m in self.interceptors if m.active]
             
-            if self.render_mode == "human": self.render()
+            # --- FIX: PREVENT MEMORY LEAK ---
+            # If we are NOT rendering, we must still clear the Pygame Event Queue.
+            # Otherwise, unhandled events pile up and slow down the process over time.
+            if self.render_mode == "human":
+                self.render()
+            else:
+                if pygame.get_init():
+                    pygame.event.pump() # Discards events to keep queue empty
 
-        # 3. REWARDS & LOGIC
+        # 3. HIGH LEVEL LOGIC & SHARED REWARDS
         alive_count = 0
-        dist_sum = 0
+        team_reached_target = False
         
         for i, ag in enumerate(self.agents):
             if ag.active:
                 alive_count += 1
                 
-                # Stuck check
+                # Stuck Check
                 dist_moved = np.linalg.norm(ag.position - self.previous_positions[i])
                 if dist_moved < 2.0: self.stuck_timers[i] += 1
                 else: self.stuck_timers[i] = 0
@@ -156,23 +174,46 @@ class DroneEnvCommander(gym.Env):
                 
                 if self.stuck_timers[i] > 10:
                     ag.active = False
-                    rewards -= 20.0
+                    rewards[i] -= 20.0
                     continue
 
                 d = np.linalg.norm(ag.position - self.target_pos)
-                dist_sum += d
+                
+                # DISTANCE SHAPING (Individual)
+                rewards[i] -= (d / self.SCREEN_SIZE) * 0.1
+                
+                # BRAVERY BONUS (Individual)
+                # Reward for being in the Danger Zone (within 250px) to prevent camping
+                if d < 250.0:
+                    rewards[i] += 0.2
+
+                # CHECK VICTORY
                 if d < 40.0:
-                    rewards += 100.0
+                    team_reached_target = True
                     ag.active = False 
 
-        if alive_count > 0: 
-            rewards -= (dist_sum / alive_count / self.SCREEN_SIZE)
+        # --- SHARED FATE REWARD ---
+        if team_reached_target:
+            # Everyone gets the big prize, even if dead
+            rewards[:] += 100.0
+            terminated = True
+        else:
+            terminated = False
+
+        # Team Wipe Check
+        if alive_count == 0 and not team_reached_target:
+            terminated = True
+            rewards[:] -= 20.0 # Failed mission penalty
         
-        rewards -= 0.1
-        terminated = (alive_count == 0)
+        rewards -= 0.1 # Time penalty (Applied to all? No, usually applied once for the team step)
+        
         truncated = (self.current_step_count >= self.max_steps)
         
-        return self._get_obs(), rewards, terminated, truncated, {"alive": alive_count}
+        # CRITICAL FIX: Sum rewards to create a single "Team Score"
+        # PPO expects a float, not an array.
+        total_team_reward = float(np.sum(rewards))
+        
+        return self._get_obs(), total_team_reward, terminated, truncated, {"alive": alive_count}
 
     def _check_los(self, start, end):
         if start[2] > 50 or end[2] > 50: return True
@@ -201,7 +242,7 @@ class DroneEnvCommander(gym.Env):
             norm_dist_t = min(dist_t / self.SCREEN_SIZE, 1.0)
             agent_obs.extend([norm_dist_t, np.cos(angle_t), np.sin(angle_t)])
             
-            # 3. Threat (4)
+            # 3. Threat (4) - With LOS Check
             closest_m = None
             min_dist_m = 9999.0
             for m in self.interceptors:
@@ -222,8 +263,7 @@ class DroneEnvCommander(gym.Env):
             else:
                 agent_obs.extend([1.0, 0.0, 0.0, -1.0])
             
-            # 4. Teammate Info (NEW - 3 floats)
-            # Find nearest ally
+            # 4. Teammate Info (3)
             ally = None
             min_d_ally = 9999.0
             for j, other in enumerate(self.agents):
@@ -234,34 +274,20 @@ class DroneEnvCommander(gym.Env):
                     ally = other
             
             if ally:
-                # Relative vector
                 vec_a = ally.position - ag.position
                 dist_a = min(min_d_ally / self.SCREEN_SIZE, 1.0)
                 ang_a = np.arctan2(vec_a[1], vec_a[0])
                 agent_obs.extend([dist_a, np.cos(ang_a), np.sin(ang_a)])
             else:
-                agent_obs.extend([0.0, 0.0, 0.0]) # No ally/dead
+                agent_obs.extend([0.0, 0.0, 0.0]) 
 
-            # 5. SAM Status (NEW - 2 floats)
-            # "Is the turret looking at me?"
-            vec_to_sam = self.sam_site.pos - ag.position
-            angle_to_sam = math.atan2(vec_to_sam[1], vec_to_sam[0])
-            # The turret angle is absolute (0=East). 
-            # We need to rotate it by 180 to compare with "Angle TO sam".
-            # Actually, simpler: Vector from SAM to Agent vs SAM Angle.
+            # 5. SAM Status (2)
             vec_sam_to_ag = ag.position - self.sam_site.pos
             angle_sam_to_ag = math.atan2(vec_sam_to_ag[1], vec_sam_to_ag[0])
-            
             angle_diff = angle_sam_to_ag - self.sam_site.angle
-            # Normalize -PI to PI
             angle_diff = (angle_diff + np.pi) % (2 * np.pi) - np.pi
-            
-            # 1.0 = Focused on me, 0.0 = Looking away
             is_focused = max(0, 1.0 - abs(angle_diff))
-            
-            # SAM State: 1=Locking/Firing (Danger), 0=Scanning/Reloading (Safe)
             is_dangerous = 1.0 if self.sam_site.state in ["TRACKING", "LOCKING"] else 0.0
-            
             agent_obs.extend([is_focused, is_dangerous])
 
             # Dynamic Padding (Goal 20)
@@ -291,6 +317,46 @@ class DroneEnvCommander(gym.Env):
                 self.walls.append(pygame.Rect(x, y, w, h))
         self.target_pos = np.array([center, center, 10.0])
 
+    def _generate_urban_canyon_map(self):
+        """
+        Harder Map: Buildings clustered tight around the center.
+        Creates a 'Kill Box' courtyard where the SAM lives.
+        """
+        self.walls = []
+        block_size = 120
+        street_width = 60 # Narrower streets = more cover
+        
+        center = self.SCREEN_SIZE / 2
+        
+        # Grid generation
+        num_blocks = self.SCREEN_SIZE // (block_size + street_width) + 1
+        
+        for i in range(num_blocks):
+            for j in range(num_blocks):
+                x = i * (block_size + street_width) 
+                y = j * (block_size + street_width)
+                
+                # Distance to center
+                dist = np.linalg.norm([x + block_size/2 - center, y + block_size/2 - center])
+                
+                # CRITICAL CHANGE: The "Courtyard" Logic
+                # Only clear a VERY small area for the SAM (radius 80).
+                # This means buildings will exist 81px away from the SAM.
+                if dist < 80: 
+                    continue
+                
+                # Create the wall
+                w = block_size + np.random.randint(-10, 10)
+                h = block_size + np.random.randint(-10, 10)
+                
+                # Irregular offsets to create "Lines of Sight"
+                off_x = np.random.randint(-20, 20)
+                off_y = np.random.randint(-20, 20)
+                
+                self.walls.append(pygame.Rect(x + off_x, y + off_y, w, h))
+        
+        self.target_pos = np.array([center, center, 10.0])
+
     def render(self):
         if self.render_mode is None: return
         if self.screen is None:
@@ -309,7 +375,6 @@ class DroneEnvCommander(gym.Env):
         pygame.draw.circle(self.screen, (0, 100, 0), (int(self.target_pos[0]), int(self.target_pos[1])), 40, 2)
         pygame.draw.circle(self.screen, (0, 255, 0), (int(self.target_pos[0]), int(self.target_pos[1])), 10)
         
-        # Draw SAM Turret
         sam_end = (int(self.sam_site.pos[0] + math.cos(self.sam_site.angle)*30),
                    int(self.sam_site.pos[1] + math.sin(self.sam_site.angle)*30))
         turret_color = (255, 0, 0) if self.sam_site.state in ["LOCKING", "FIRING"] else (100, 100, 100)

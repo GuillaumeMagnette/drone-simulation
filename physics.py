@@ -91,7 +91,7 @@ class Agent:
 class Interceptor:
     def __init__(self, x, y, z, target_agent, heading_vector):
         self.position = np.array([float(x), float(y), float(z)])
-        self.speed = 600.0 
+        self.speed = 900.0 
         self.target = target_agent
         self.active = True
         self.lifetime = 6.0
@@ -155,11 +155,11 @@ class SAMSite:
         self.angle = 0.0 # Radians
         self.state = "SCANNING" # SCANNING, TRACKING, FIRING, RELOADING
         
-        # Realism Constants
-        self.ROTATION_SPEED = 2.0  # Rad/s (~115 degrees/sec)
-        self.LOCK_TIME_REQUIRED = 0.5 # Seconds to hold target before firing
-        self.RELOAD_TIME = 2.5     # Seconds between shots
-        self.RANGE = 600.0
+        # Realism Constants (HARD MODE)
+        self.ROTATION_SPEED = 3.0  # ~170 deg/sec. Impossible to outrun.
+        self.LOCK_TIME_REQUIRED = 0.1 # Fast lock
+        self.RELOAD_TIME = 2.0     # Fast reload
+        self.RANGE = 700.0         # Covers almost the whole map
         
         # Internal timers
         self.lock_timer = 0.0

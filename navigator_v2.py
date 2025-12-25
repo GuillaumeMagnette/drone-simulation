@@ -387,15 +387,49 @@ class Navigator:
             walls=self.pathfinder.walls
         )
 
-    def get_control_force(self, agent, target_pos, walls, missiles):
+    # Update signature to accept 'true_objective'
+    def get_control_force(self, agent, command_pos, walls, missiles, true_objective=None):
         if self.pathfinder is None:
             self.pathfinder = Pathfinder(walls, 1200, grid_size=30)
         
-        for k in self.last_forces:
-            self.last_forces[k] = np.zeros(3)
+        for k in self.last_forces: self.last_forces[k] = np.zeros(3)
         
         pos = agent.position
         vel = agent.velocity
+
+        # === 0. TERMINAL PHASE OVERRIDE (The "Kamikaze" Reflex) ===
+        # Check distance to the REAL GOAL (Green Dot), not the Command (Blue X)
+        active_target = command_pos # Default to Blue X
+        
+        if true_objective is not None:
+            dist_to_obj = np.linalg.norm(true_objective[:2] - pos[:2])
+            
+            # If we are close to the WIN condition, ignore Commander, ignore Walls.
+            # Dive on the Objective.
+            if dist_to_obj < 60.0: # Increased range to catch them earlier
+                active_target = true_objective # Override target
+                
+                # FULL AGGRESSION LOGIC
+                vec = active_target - pos
+                dist = np.linalg.norm(vec)
+                
+                if dist > 0:
+                    desired_vel = (vec / dist) * 800.0 # Max Overdrive
+                    total_force = (desired_vel - vel) * 20.0 
+                    
+                    z_err = active_target[2] - pos[2]
+                    total_force[2] = (z_err * 40.0) - (vel[2] * 5.0) 
+                    
+                    f_mag = np.linalg.norm(total_force)
+                    if f_mag > 5000.0:
+                        total_force = (total_force / f_mag) * 5000.0
+                        
+                    self.last_forces['attract'] = total_force
+                    return total_force
+
+        # === STANDARD NAVIGATION LOGIC BELOW ===
+        # Use active_target (which is usually command_pos) for the rest
+        target_pos = command_pos
 
         # Effective target altitude (force high if inside building footprint)
         eff_z = target_pos[2]
@@ -434,7 +468,6 @@ class Navigator:
                     current_goal = valid_target
             else:
                 # NO PATH FOUND - target is unreachable by ground
-                # Solution: Force high altitude to fly over obstacles
                 eff_z = BUILDING_HEIGHT + 20.0  # Override to fly high
                 current_goal = target_pos.copy()
 
@@ -464,14 +497,12 @@ class Navigator:
                 if not w.colliderect(sense_rect):
                     continue
                     
-                # Find closest point on wall to agent
                 closest_x = max(w.left, min(pos[0], w.right))
                 closest_y = max(w.top, min(pos[1], w.bottom))
                 vec_away = pos[:2] - np.array([closest_x, closest_y])
                 dist_to_wall = max(0.1, np.linalg.norm(vec_away))
                 
                 if dist_to_wall < self.SENSE_RADIUS:
-                    # Inverse-square repulsion, but gentler
                     force_mag = self.K_REPULSE_WALL * (1.0/dist_to_wall - 1.0/self.SENSE_RADIUS)
                     self.last_forces['repulse'][:2] += (vec_away / dist_to_wall) * force_mag * repulsion_scale
 
@@ -487,7 +518,7 @@ class Navigator:
         elif pos[1] > screen - edge_margin:
             self.last_forces['repulse'][1] -= self.K_REPULSE_WALL * (1/max(1, screen-pos[1]) - 1/edge_margin)
 
-        # 4. MISSILE AVOIDANCE (unchanged - this should override everything)
+        # 4. MISSILE AVOIDANCE
         for m in missiles:
             if not m.active:
                 continue
@@ -495,15 +526,12 @@ class Navigator:
             dist_to_missile = np.linalg.norm(vec_to_agent)
             
             if dist_to_missile < 250:
-                # Only evade if missile is approaching
                 closing_vel = m.velocity - vel
                 if np.dot(closing_vel, vec_to_agent / (dist_to_missile + 0.01)) > 0:
-                    # Perpendicular dodge
                     perp = np.cross(vec_to_agent, [0, 0, 1])
                     perp_norm = np.linalg.norm(perp)
                     if perp_norm > 0.1:
                         perp /= perp_norm
-                    # Choose dodge direction based on current velocity
                     if np.dot(perp, vel) < 0:
                         perp = -perp
                     
@@ -525,8 +553,13 @@ class Navigator:
 
         # Z control (altitude)
         z_error = eff_z - pos[2]
-        z_force = (z_error * 25.0) - (vel[2] * 10.0)
-        z_force = max(-20.0, z_force)  # Don't slam down too hard
+        # Stronger P-gain for descent (30.0)
+        z_force = (z_error * 30.0) - (vel[2] * 10.0)
+        
+        # FIX: Allow aggressive diving. 
+        # -100 means we can apply negative thrust (push down) + gravity
+        z_force = max(-100.0, z_force) 
+        
         total_lift = np.clip(z_force + (15.0 * agent.mass) + self.last_forces['avoid'][2], -1000, 1500)
         total_force[2] = total_lift
         self.last_forces['lift'][2] = total_lift
