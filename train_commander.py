@@ -10,7 +10,7 @@ from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv
 from drone_env_commander import DroneEnvCommander
 
 # --- CONFIGURATION ---
-LOAD_FROM_LATEST = True    # Set TRUE to resume, FALSE to start new
+LOAD_FROM_LATEST = False    # Set TRUE to resume, FALSE to start new
 TOTAL_TIMESTEPS = 2_000_000 
 NUM_ENVS = 4               
 LEARNING_RATE = 3e-4

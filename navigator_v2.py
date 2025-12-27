@@ -253,10 +253,10 @@ class Pathfinder:
 class Navigator:
     def __init__(self):
         # Tuned for cooperation with cost-based A*
-        self.K_ATTRACT = 12.0           # Strong goal pull
-        self.K_REPULSE_WALL = 1500.0    # Moderate wall push (A* handles routing)
+        self.K_ATTRACT = 6.0            # Reduced pull (was 12.0) to prevent overshoot
+        self.K_REPULSE_WALL = 1500.0    
         self.K_AVOID_MISSILE = 4500.0
-        self.SENSE_RADIUS = 50.0        # Tighter sensing - trust the path more
+        self.SENSE_RADIUS = 60.0        # Look ahead more
         
         self.pathfinder = None
         self.last_forces = {k: np.zeros(3) for k in ['attract', 'repulse', 'avoid', 'lift']}
